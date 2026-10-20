@@ -103,12 +103,51 @@ lyrics:
 media_files_yaml:
   list-artists-from-files-yaml
   play-rand-file-from-files-yaml
+mediascan_db:
+  list-albums
+  list-artists
+  list-mediafiles
 rename:
   rename-album-files
 stats:
   genre-clusters
   mediastats
 ```
+
+## List Mediascan Database Tables
+
+Set `MOONGAS_COLLECTION_ROOTDIR` to the active Moongas collection, then run:
+
+```bash
+list-artists
+list-albums
+list-mediafiles
+```
+
+These scripts use the `mediascan` library to open
+`$MOONGAS_COLLECTION_ROOTDIR/mediascan.db` and print every row and column of the
+`artist`, `album`, and `mediafile` tables, respectively, without modifying the
+database. All headers and values are left-aligned, with no row, column, or value
+truncation. The collection variable and an existing database file are required.
+
+The modules can also be run with
+`python -m mediascripts.mediascan_db.list_artists`,
+`python -m mediascripts.mediascan_db.list_albums`, or
+`python -m mediascripts.mediascan_db.list_mediafiles`.
+
+## `scan-to-album-yaml` - Create Album YAML Files
+
+With `MOONGAS_COLLECTION_ROOTDIR` set and `moongas-mediascan-go` available beneath
+that directory, run:
+
+```bash
+mediascripts --create-script-symlinks
+./scan-to-album-yaml
+```
+
+This uses the collection's `mediascan-config.yml` to create missing `album.yml`
+files. Existing album YAML files are never overwritten. Additional arguments are
+passed through to the Go scanner.
 
 ## `show-env` - Show Moongas Environment Variables
 ```bash
@@ -123,4 +162,3 @@ user@host:~/Git/moongas-org/moongas/moongas-collection-local$ ./show-env
 ------------------------------------------------------------------------------
 
 ```
-
