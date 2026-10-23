@@ -114,6 +114,7 @@ stats:
   mediastats
 track:
   compare-track-yaml-with-media-file
+  merge-track-yaml-with-media-file
 ```
 
 ## Compare Track YAML with MP3 Tags
@@ -151,6 +152,41 @@ missing YAML or tags, malformed YAML, and unreadable media files.
 Files are never modified. Exit status is 0 if all tracks match, or 1 for any
 difference or error. It also runs as
 `python -m mediascripts.track.track_yaml.compare_track_yaml_with_media_file`.
+
+## Merge Track YAML with MP3 Tags
+
+```bash
+merge-track-yaml-with-media-file
+merge-track-yaml-with-media-file --dir "/path/to/music" --quiet
+```
+
+Uses the same recursive scanning, six-field comparison, and artist exclusions as
+the comparison script. For each difference, it displays the track, field, and
+both values, then asks you to type a shortcut followed by Enter:
+
+| Shortcut | Choice | Effect |
+|----------|--------|--------|
+| `y` or Enter | Accept Track YAML (default) | Updates that ID3 tag from YAML |
+| `m` | Accept Media File Tags | Updates that YAML field from ID3 |
+| `e` | Enter value | Prompts for a value and saves it to both YAML and ID3 |
+| `s` | Skip | Leaves that field unchanged |
+
+Invalid shortcuts prompt again. Custom values cannot be blank; custom years
+must contain four digits. Missing or multiple media values cannot be
+copied into a single YAML field; choose YAML, Enter value, or Skip instead. ID3 dates are
+compared by year; accepting media tags writes an integer YAML year, while
+accepting the YAML year replaces the ID3 date with that year.
+
+Each accepted field is saved immediately. Unrelated media tags and YAML fields,
+comments, and quoted strings are preserved using round-trip YAML support.
+YAML updates use a temporary file and atomic replacement. `--quiet` suppresses
+matching tracks, not conflict prompts or errors. Ctrl+C or end-of-input stops
+the run, preserving previously accepted changes.
+
+Exit status is 0 if every conflict is resolved, 1 for skipped conflicts or
+errors, and 130 when interrupted. Missing or malformed YAML and unreadable tags
+are reported, not synthesized. You can also run
+`python -m mediascripts.track.track_yaml.merge_track_yaml_with_media_file`.
 
 ## List Mediascan Database Tables
 

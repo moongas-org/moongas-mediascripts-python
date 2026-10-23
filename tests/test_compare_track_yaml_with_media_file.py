@@ -6,6 +6,7 @@ import pytest
 from mutagen.easyid3 import EasyID3
 
 from mediascripts.track.track_yaml import compare_track_yaml_with_media_file as compare
+from mediascripts.track.track_yaml.track_yaml_common import process_collection
 
 
 @pytest.fixture(autouse=True)
@@ -87,7 +88,7 @@ def test_excluded_artist_directory_skips_unreadable_metadata(
 
     with caplog.at_level(logging.INFO):
         assert compare.compare_track(track)
-        assert compare.compare_collection(tmp_path, album_directories_only=False)
+        assert process_collection(tmp_path, compare.compare_track, album_directories_only=False)
     assert caplog.text == ""
 
 
@@ -160,7 +161,7 @@ def test_collection_follows_library_symlinks_and_ignores_non_tracks(
     (track.parent / "album.yml").write_text("not track metadata", encoding="utf-8")
     (data / "not-an-album.mp3").touch()
     with caplog.at_level(logging.INFO):
-        assert compare.compare_collection(data)
+        assert process_collection(data, compare.compare_track)
     assert caplog.text.count("Track YAML matches") == 1
 
 
