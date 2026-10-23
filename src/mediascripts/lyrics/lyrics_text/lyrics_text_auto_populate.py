@@ -5,12 +5,20 @@ Or from script symlink: lyrics-text-auto-populate [options]
 Searches every album directory in the collection for media tracks that lack a
 lyrics text file ("<track-name>.txt", same base filename as the track).
 Tracks that already have a lyrics text file are left untouched.
+Existence is checked again before each lookup, and saving never replaces an
+existing lyrics text file, including one created by another running instance.
 For tracks without one, the plain lyrics are looked up via LRCLIB (https://lrclib.net)
 and, if found, written to the lyrics text file. LRC files are ignored.
+Pending lookups are shuffled each run; --lookup=false listings remain sorted.
+Every HTTP request and its outcome are logged. Transient failures are queued
+behind other pending tracks, with at most five attempts per track per run.
 
 Tracks that LRCLIB reports as instrumental or cannot find are recorded in a lookup
 cache ($XDG_CACHE_HOME/moongas/lyrics_text_lookups.json) so they aren't re-queried
 on later runs. Use --retry-not-found to query not-found tracks again.
+HTTP lookup failures are logged by status code without a traceback and counted
+as errors, not cached as missing lyrics.
+Request timeouts are also logged without a traceback and counted as errors.
 
 It expects the environment variable MOONGAS_COLLECTION_ROOTDIR to be set,
 pointing to the root directory of the Moongas collection,
@@ -27,7 +35,8 @@ which in turn contains one or more library directories e.g. `Music`
 
 
 Command line options:
-  --sleep            Seconds to sleep between LRCLIB requests (default: 0.5).
+  --sleep            Initial seconds between LRCLIB requests (default: 0.5).
+                     Each HTTP 4xx/5xx response adds 0.5 seconds for the rest of the run.
   --lookup           Enable LRCLIB lookups (default: true). Use --lookup=false to only list missing lyrics files.
   --file             Specify a single media track file to process. Must be the full path to the file.
   --dir              Process media tracks in a single album directory; mutually exclusive with --file.
@@ -39,16 +48,17 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import date
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Optional
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -93,6 +103,8 @@ LRC_TIMESTAMP_PATTERN = re.compile(r"^\s*(?:\[\d+:\d+(?:[.:]\d+)?\])+\s?", re.MU
 
 LRCLIB_BASE_URL = "https://lrclib.net"
 LRCLIB_MAX_ATTEMPTS = 5
+_request_delay_seconds = 0.5
+_retry_after_seconds = 0.0
 # LRCLIB only matches /api/get when durations are within ±2 seconds
 DURATION_TOLERANCE_SECONDS = 2
 
@@ -112,9 +124,11 @@ LOOKUP_CACHE_PATH = (
     / "lyrics_text_lookups.json"
 )
 STATUS_SAVED = "saved"
+STATUS_SKIPPED = "skipped"
 STATUS_INSTRUMENTAL = "instrumental"
 STATUS_NOT_FOUND = "not_found"
 STATUS_ERROR = "error"
+STATUS_RETRY = "retry"
 
 
 @dataclass
@@ -166,29 +180,30 @@ def read_track_info(track_path: Path) -> TrackInfo:
 
 def lrclib_request(endpoint: str, params: dict[str, Any]) -> Any:
     """Return the decoded JSON response, or None on 404."""
+    global _request_delay_seconds, _retry_after_seconds
     url = f"{LRCLIB_BASE_URL}{endpoint}?{urlencode(params)}"
-    for attempt in range(1, LRCLIB_MAX_ATTEMPTS + 1):
-        request = Request(url, headers={"User-Agent": USER_AGENT})
-        try:
-            with urlopen(request, timeout=30) as response:
-                return json.load(response)
-        except HTTPError as e:
-            if e.code == 404:
-                return None
-            if e.code in (429, 503) and attempt < LRCLIB_MAX_ATTEMPTS:
-                try:
-                    retry_after = float(e.headers.get("Retry-After", "5"))
-                except ValueError:
-                    retry_after = 5.0
-                logger.warning(
-                    "LRCLIB returned HTTP %d; retrying in %.1f seconds",
-                    e.code,
-                    retry_after,
-                )
-                time.sleep(retry_after)
-                continue
-            raise
-    return None
+    request = Request(url, headers={"User-Agent": USER_AGENT})
+    logger.info("LRCLIB request: GET %s params=%r", endpoint, params)
+    try:
+        with urlopen(request, timeout=30) as response:
+            record = json.load(response)
+        logger.info("LRCLIB request completed: GET %s", endpoint)
+        return record
+    except HTTPError as e:
+        if 400 <= e.code < 600:
+            _request_delay_seconds += 0.5
+            logger.warning(
+                "LRCLIB GET %s returned HTTP %d; request delay increased to %.1f seconds",
+                endpoint, e.code, _request_delay_seconds,
+            )
+        if e.code == 404:
+            return None
+        if e.code == 429 or 500 <= e.code < 600:
+            try:
+                _retry_after_seconds = float(e.headers.get("Retry-After", "5"))
+            except ValueError:
+                _retry_after_seconds = 5.0
+        raise
 
 
 def durations_match(record: dict[str, Any], info: TrackInfo) -> bool:
@@ -210,6 +225,8 @@ def lookup_lyrics(info: TrackInfo) -> Optional[dict[str, Any]]:
         return record
 
     # Fall back to search, which tolerates album name differences
+    logger.info("LRCLIB exact lookup found no record; falling back to /api/search")
+    time.sleep(_request_delay_seconds)
     results: list[dict[str, Any]] = (
         lrclib_request(
             "/api/search", {"artist_name": info.artist, "track_name": info.title}
@@ -303,6 +320,9 @@ def find_tracks_missing_lyrics_in_directory(album_dir: Path) -> list[Path]:
 def process_track(track_path: Path) -> str:
     filename = track_path.name
     lyrics_path = lyrics_text_path_for(track_path)
+    if lyrics_path.exists():
+        logger.info("[%s] Lyrics text file already exists; skipping lookup", filename)
+        return STATUS_SKIPPED
     temporary_path: Path | None = None
 
     info = read_track_info(track_path)
@@ -343,13 +363,13 @@ def process_track(track_path: Path) -> str:
             temporary_file.write(content + "\n")
             temporary_path = Path(temporary_file.name)
 
-        if lyrics_path.exists():
+        try:
+            os.link(temporary_path, lyrics_path)
+        except FileExistsError:
             logger.info(
                 "[%s] Lyrics text file appeared meanwhile; not overwriting", filename
             )
-            return STATUS_SAVED
-        os.replace(temporary_path, lyrics_path)
-        temporary_path = None
+            return STATUS_SKIPPED
 
         logger.info(
             "[%s] Saved %d characters from LRCLIB record %s to %s",
@@ -360,8 +380,21 @@ def process_track(track_path: Path) -> str:
         )
         return STATUS_SAVED
 
+    except HTTPError as e:
+        logger.error("[%s] LRCLIB returned HTTP %d; lookup failed", filename, e.code)
+        if e.code in (408, 429) or 500 <= e.code < 600:
+            return STATUS_RETRY
     except Exception as e:
-        logger.exception("[%s] Failed (%s): %s", filename, type(e).__name__, e)
+        if isinstance(e, TimeoutError) or (
+            isinstance(e, URLError) and isinstance(e.reason, TimeoutError)
+        ):
+            logger.error("[%s] LRCLIB request timed out; lookup failed", filename)
+            return STATUS_RETRY
+        elif isinstance(e, URLError):
+            logger.error("[%s] LRCLIB connection failed: %s", filename, e.reason)
+            return STATUS_RETRY
+        else:
+            logger.exception("[%s] Failed (%s): %s", filename, type(e).__name__, e)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -375,6 +408,9 @@ def main_loop(
     retry_not_found: bool = False,
     specific_dir: Optional[Path] = None,
 ):
+    global _request_delay_seconds, _retry_after_seconds
+    _request_delay_seconds = sleep_between_requests
+    _retry_after_seconds = 0.0
     collection_data_path = Path(MOONGAS_COLLECTION_ROOTDIR) / "data"
     logger.info("Collection data directory: %s", collection_data_path.resolve())
 
@@ -416,6 +452,7 @@ def main_loop(
     pending = [
         t for t in tracks if not is_cached_as_skippable(cache, t, retry_not_found)
     ]
+    random.shuffle(pending)
     logger.info(
         "Skipping %d track(s) cached as instrumental/not found (cache: %s)",
         len(tracks) - len(pending),
@@ -423,23 +460,46 @@ def main_loop(
     )
 
     statuses: Counter[str] = Counter()
-    for index, track_path in enumerate(
-        tqdm(pending, desc="Looking up lyrics", unit="track")
-    ):
-        if index:
-            time.sleep(sleep_between_requests)
-        status = process_track(track_path)
-        statuses[status] += 1
-        key = str(track_path.resolve())
-        if status in (STATUS_INSTRUMENTAL, STATUS_NOT_FOUND):
-            cache[key] = {"status": status, "checked": date.today().isoformat()}
-            save_lookup_cache(cache)
-        elif status == STATUS_SAVED and cache.pop(key, None) is not None:
-            save_lookup_cache(cache)
+    attempts: Counter[Path] = Counter()
+    queue = deque(pending)
+    with tqdm(total=len(pending), desc="Looking up lyrics", unit="track") as progress:
+        while queue:
+            track_path = queue.popleft()
+            if attempts:
+                time.sleep(max(_request_delay_seconds, _retry_after_seconds))
+                _retry_after_seconds = 0.0
+            attempts[track_path] += 1
+            logger.info(
+                "[%s] Attempt %d/%d (%d other track(s) pending)",
+                track_path.name, attempts[track_path], LRCLIB_MAX_ATTEMPTS, len(queue),
+            )
+            status = process_track(track_path)
+            if status == STATUS_RETRY:
+                if attempts[track_path] < LRCLIB_MAX_ATTEMPTS:
+                    queue.append(track_path)
+                    logger.warning(
+                        "[%s] Deferred until after %d pending track(s)",
+                        track_path.name, len(queue) - 1,
+                    )
+                    continue
+                logger.error(
+                    "[%s] Giving up after %d attempts this run",
+                    track_path.name, attempts[track_path],
+                )
+                status = STATUS_ERROR
+            statuses[status] += 1
+            progress.update(1)
+            key = str(track_path.resolve())
+            if status in (STATUS_INSTRUMENTAL, STATUS_NOT_FOUND):
+                cache[key] = {"status": status, "checked": date.today().isoformat()}
+                save_lookup_cache(cache)
+            elif status == STATUS_SAVED and cache.pop(key, None) is not None:
+                save_lookup_cache(cache)
 
     logger.info(
-        "Batch complete: %d saved, %d instrumental, %d not found, %d errors",
+        "Batch complete: %d saved, %d skipped, %d instrumental, %d not found, %d errors",
         statuses[STATUS_SAVED],
+        statuses[STATUS_SKIPPED],
         statuses[STATUS_INSTRUMENTAL],
         statuses[STATUS_NOT_FOUND],
         statuses[STATUS_ERROR],
@@ -454,7 +514,10 @@ def main():
         "--sleep",
         type=float,
         default=0.5,
-        help="Seconds to sleep between LRCLIB requests (default: 0.5).",
+        help=(
+            "Initial seconds between LRCLIB requests (default: 0.5). "
+            "Each HTTP 4xx/5xx response adds 0.5 seconds for the rest of the run."
+        ),
     )
     parser.add_argument(
         "--lookup",
