@@ -112,7 +112,45 @@ rename:
 stats:
   genre-clusters
   mediastats
+track:
+  compare-track-yaml-with-media-file
 ```
+
+## Compare Track YAML with MP3 Tags
+
+With `MOONGAS_COLLECTION_ROOTDIR` set, run:
+
+```bash
+compare-track-yaml-with-media-file
+compare-track-yaml-with-media-file --quiet
+compare-track-yaml-with-media-file --dir "/path/to/music" --quiet
+```
+
+`-d` / `--dir` recursively scans the specified directory and all subdirectories,
+without requiring `MOONGAS_COLLECTION_ROOTDIR` or a collection folder structure.
+It takes precedence over the environment variable.
+
+The script walks album directories under `$MOONGAS_COLLECTION_ROOTDIR/data`,
+following library symlinks, and compares each MP3 with its sibling `<track>.yml`.
+It uses Mutagen to compare the six core `trackData` fields: `title`, `artist`,
+`albumartist`, `album`, `genre`, and `year` (against the ID3 date's year).
+Leading/trailing whitespace is ignored; additional ID3 values are reported as
+differences. Extra tags and streaming identifiers are not compared.
+
+Tracks are skipped before reading YAML or media tags when their artist directory
+contains any newline-separated keyword in `COPY_MEDIALIB_EXCLUDE_KEYWORDS`.
+The YAML `artist` is also checked when the directory is not excluded. Matching is
+case-sensitive, as in the copy scripts; blank lines are ignored. For example:
+
+```bash
+export COPY_MEDIALIB_EXCLUDE_KEYWORDS=$'Excluded Artist\nAnother Artist'
+```
+
+`-q` / `--quiet` suppresses matching tracks, but still reports differences,
+missing YAML or tags, malformed YAML, and unreadable media files.
+Files are never modified. Exit status is 0 if all tracks match, or 1 for any
+difference or error. It also runs as
+`python -m mediascripts.track.track_yaml.compare_track_yaml_with_media_file`.
 
 ## List Mediascan Database Tables
 

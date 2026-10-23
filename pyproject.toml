@@ -56,6 +56,7 @@ artist-yaml-reformat-with-files-yaml = "mediascripts.artist.artist_yaml.artist_y
 artist-yaml-test-with-files-yaml = "mediascripts.artist.artist_yaml.artist_yaml_test_with_files_yaml:main"
 convert-covers = "mediascripts.convert.convert_covers:main"
 convert-videos = "mediascripts.convert.convert_videos:main"
+compare-track-yaml-with-media-file = "mediascripts.track.track_yaml.compare_track_yaml_with_media_file:main"
 copy-medialib = "mediascripts.copy.copy_medialib:main"
 generate-dataclasses = "mediascripts.dev.generate_dataclasses:main"
 genre-clusters = "mediascripts.stats.genre_clusters:main"

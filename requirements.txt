@@ -17,6 +17,7 @@ kiwisolver==1.5.1
 matplotlib==3.11.2
 mediascan==1.2.1
 mediatest==1.2.1
+mutagen==1.48.1
 narwhals==2.26.0
 numpy==2.5.3
 openai==3.16.2
