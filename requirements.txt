@@ -34,6 +34,7 @@ pytest==9.1.1
 pytest-progress==1.4.0
 python-dateutil==2.9.0.post0
 PyYAML==6.0.3
+readchar==4.2.2
 ruff==0.16.8
 ruamel.yaml==0.19.1
 scikit-learn==1.9.1

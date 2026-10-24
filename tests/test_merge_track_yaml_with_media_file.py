@@ -14,6 +14,66 @@ from mediascripts.track.track_yaml import merge_track_yaml_with_media_file as me
 from mediascripts.track.track_yaml.track_yaml_common import TAG_FIELDS
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Pseudo-terminal test requires POSIX")
+@pytest.mark.parametrize(
+    ("key", "result"),
+    [(b"y", "y"), (b"m", "m"), (b"e", "e"), (b"s", "s"),
+     (b"\r", "y"), (b" ", "m"), (b"\x03", "interrupted"), (b"\x04", "interrupted")],
+)
+def test_terminal_choice_requires_no_enter_and_restores_terminal(
+    key: bytes, result: str
+) -> None:
+    import pty
+    import termios
+    import time
+
+    master, slave = pty.openpty()
+    original_settings = termios.tcgetattr(slave)
+    code = (
+        "from pathlib import Path\n"
+        "from mediascripts.track.track_yaml.merge_track_yaml_with_media_file import prompt_resolution, prompt_custom_value\n"
+        "try:\n"
+        "    result = prompt_resolution(Path('Track.mp3'), 'title', 'YAML', ['ID3'])\n"
+        "except (KeyboardInterrupt, EOFError):\n"
+        "    result = 'interrupted'\n"
+        "if result == 'e':\n"
+        "    print('CUSTOM=' + prompt_custom_value('title'))\n"
+        "print('RESULT=' + result)\n"
+    )
+    try:
+        with subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ) as process:
+            try:
+                deadline = time.monotonic() + 10
+                while termios.tcgetattr(slave)[3] & termios.ICANON:
+                    assert process.poll() is None, "Prompt exited before reading a key"
+                    assert time.monotonic() < deadline, "Prompt did not enable single-key input"
+                    time.sleep(0.01)
+                # No newline is sent for shortcuts. Space must not accept the
+                # destructive default; the next valid key chooses media instead.
+                os.write(master, key + (b"m" if key == b" " else b""))
+                if key == b"e":
+                    while not termios.tcgetattr(slave)[3] & termios.ICANON:
+                        assert time.monotonic() < deadline, "Custom input did not restore line editing"
+                        time.sleep(0.01)
+                    os.write(master, b"Entered title\n")
+                output, errors = process.communicate(timeout=10)
+                assert process.returncode == 0, errors
+                assert f"RESULT={result}" in output
+                if key == b"e":
+                    assert "CUSTOM=Entered title" in output
+                assert termios.tcgetattr(slave) == original_settings
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
 @pytest.fixture
 def track(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("COPY_MEDIALIB_EXCLUDE_KEYWORDS", raising=False)
@@ -157,11 +217,11 @@ def test_invalid_input_reprompts_and_uppercase_shortcut_works(
     tags = EasyID3(track)
     tags["title"] = "Different"
     tags.save(track)
-    choices = iter(["invalid", " Y "])
+    choices = iter(["invalid", "Y"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(choices))
     assert merge.merge_track(track)
     output = capsys.readouterr().out
-    assert "Enter y, m, e, or s" in output
+    assert "Press y, m, e, or s" in output
     assert "Track YAML = 'Track'" in output
     assert "Media File Tags = ['Different']" in output
 

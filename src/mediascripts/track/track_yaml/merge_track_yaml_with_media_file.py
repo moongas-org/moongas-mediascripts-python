@@ -4,9 +4,10 @@ Use the collection configured by MOONGAS_COLLECTION_ROOTDIR, or recursively scan
 -d / --dir DIRECTORY. Artist exclusions and comparison rules match the comparison
 script. -q / --quiet hides matching tracks, never conflict prompts.
 
-For each conflicting field, type y (Accept Track YAML), m (Accept Media File
-Tags), e (Enter value, updates both files), or s (Skip), then Enter.
-Empty input accepts Track YAML. Each accepted change is saved
+For each conflicting field, press y (Accept Track YAML), m (Accept Media File
+Tags), e (Enter value, updates both files), or s (Skip), without pressing Enter.
+Enter accepts Track YAML. Custom values still require Enter. Redirected input
+uses line-based choices. Each accepted change is saved
 immediately; Ctrl+C or EOF stops without changing the current conflict.
 Exit status: 0 if resolved, 1 if skipped/errors, 130 if interrupted.
 """
@@ -15,11 +16,13 @@ import logging
 import os
 import re
 import stat
+import sys
 import tempfile
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Protocol, cast
 
+import readchar
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
@@ -47,17 +50,30 @@ class _TagWriter(Protocol):
     def save(self, filething: Path) -> None: ...
 
 
+def read_choice(prompt: str) -> str:
+    if not sys.stdin.isatty():
+        return input(prompt).strip()
+    print(prompt, end="", flush=True)
+    choice = readchar.readkey()
+    if choice == "\x03":
+        raise KeyboardInterrupt
+    if choice in ("", "\x04", "\x1a"):
+        raise EOFError
+    print(choice if choice in "yYmMeEsS" else "")
+    return "" if choice in ("\r", "\n") else choice
+
+
 def prompt_resolution(track_path: Path, field: str, expected: str, actual: list[str]) -> str:
     print(f"\n{track_path}\n  {field}: Track YAML = {expected!r}; Media File Tags = {actual!r}")
     while True:
-        choice = input(
+        choice = read_choice(
             "[y] Accept Track YAML (default)  [m] Accept Media File Tags  [e] Enter value  [s] Skip: "
-        ).strip().lower()
+        ).lower()
         if choice in ("y", "m", "e", "s"):
             return choice
         if not choice:
             return "y"
-        print("Enter y, m, e, or s, then press Enter.")
+        print("Press y, m, e, or s (no Enter needed).")
 
 
 def prompt_custom_value(field: str) -> str:

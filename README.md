@@ -162,7 +162,7 @@ merge-track-yaml-with-media-file --dir "/path/to/music" --quiet
 
 Uses the same recursive scanning, six-field comparison, and artist exclusions as
 the comparison script. For each difference, it displays the track, field, and
-both values, then asks you to type a shortcut followed by Enter:
+both values, then accepts a single shortcut key immediately (no Enter needed):
 
 | Shortcut | Choice | Effect |
 |----------|--------|--------|
@@ -171,6 +171,8 @@ both values, then asks you to type a shortcut followed by Enter:
 | `e` | Enter value | Prompts for a value and saves it to both YAML and ID3 |
 | `s` | Skip | Leaves that field unchanged |
 
+Enter still selects the default, Accept Track YAML. After pressing `e`, type the
+custom value and press Enter. Redirected/piped input retains line-based choices.
 Invalid shortcuts prompt again. Custom values cannot be blank; custom years
 must contain four digits. Missing or multiple media values cannot be
 copied into a single YAML field; choose YAML, Enter value, or Skip instead. ID3 dates are

@@ -7,7 +7,5 @@ SVC=moongas-mediatunes-web-vue
 SOURCE="$MOONGAS_COLLECTION_ROOTDIR/$SVC/"
 DEST=$DEST_USER@$HOST:$DEST_ROOT/$SVC/
 echo "Uploading $SOURCE to $DEST"
-# If first run, remove:
-# 1) '--exclude 'client/index.html' and 'client/dist/index.html' I added that because I've put my analytics html there
-rsync -ahvP $SOURCE $DEST --delete --exclude 'client/index.html' --exclude 'client/dist/index.html' --exclude '.git/' --exclude '.gitignore' --exclude '__pycache__/' --exclude='.venv*'
+rsync -ahvP $SOURCE $DEST --delete --exclude '.git/' --exclude '.gitignore' --exclude '__pycache__/' --exclude='.venv*'
 echo "Uploaded $SOURCE to $DEST"
