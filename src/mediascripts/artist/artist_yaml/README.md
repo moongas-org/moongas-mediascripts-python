@@ -1,5 +1,10 @@
 # artist_yaml
 
+Shared discovery, artist-path loading, exclusions, backup cleanup, validation,
+and CLI helpers live in [artist_yaml_common.py](./artist_yaml_common.py).
+The auto-populate, reformat, and validation scripts import these helpers rather
+than maintaining separate implementations.
+
 ## artist_yaml_auto_populate.py
 
 # Artist YAML LLM Auto-Populate Script (`artist_yaml_llm_auto_populate.py`)

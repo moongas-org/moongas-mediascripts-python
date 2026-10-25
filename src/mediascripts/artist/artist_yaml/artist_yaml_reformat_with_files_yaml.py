@@ -5,8 +5,13 @@ Batch modify artist.yml files to make changes to the yaml format
 import argparse
 from pathlib import Path
 
-from mediascan.artist_yaml_file_loader import load_artist_yaml_file
-from mediascan.media_files_yaml_file_loader import load_media_files_yaml_file
+from mediascan.types.artist.artist_yaml_file_loader import load_artist_yaml_file
+from mediascripts.artist.artist_yaml.artist_yaml_common import (
+    add_files_yaml_argument,
+    excluded,
+    load_artist_paths,
+    print_artist_yaml_summary,
+)
 
 """
 Converts artist.yml files from one format to another
@@ -39,28 +44,14 @@ artistData:
 
 """
 
-EXCLUDE_DIRS = ["Various Artists"]
-
-
 REFORMAT_ALL = False
-
-
-def excluded(path: Path):
-    for d in EXCLUDE_DIRS:
-        if d in str(path):
-            return True
-    return False
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Batch modifies artist.yml files to make changes to the yaml format."
     )
-    parser.add_argument(
-        "--files-yaml-path",
-        default="../../out/files.yml",
-        help="Path to the files YAML file (default: %(default)s)",
-    )
+    add_files_yaml_argument(parser)
     parser.add_argument(
         "--reformat-all",
         action="store_true",
@@ -68,12 +59,7 @@ def main():
     )
     args = parser.parse_args()
     files_yaml_path = Path(args.files_yaml_path)
-    files = load_media_files_yaml_file(files_yaml_path)
-    artist_paths: dict[str, Path] = {}
-    for file in files.files:
-        if file.artist not in artist_paths:
-            artist_paths[file.artist] = Path(file.path).parent.parent
-    print(f"loaded {len(artist_paths)} artist paths from mediafiles yaml")
+    artist_paths = load_artist_paths(files_yaml_path)
     artists_missing: list[str] = []
     artists_updated: list[Path] = []
     exceptions: list[tuple[Path, Exception]] = []
@@ -197,12 +183,7 @@ def main():
             except Exception as ex:
                 artists_missing.append(artist)
                 exceptions.append((artist_yaml_path, ex))
-    exist_count = len(artist_paths) - len(artists_missing)
-
-    print(
-        f"Found artist.yml for {exist_count} out of {len(artist_paths)} artist folders"
-    )
-    print(f"Missing count: {len(artists_missing)}")
+    print_artist_yaml_summary(len(artist_paths), len(artists_missing), "Missing count")
     # print("Writing artists missing artist.yml list to artists_missing.txt")
     # with open("artists_missing.txt", "w") as f:
     #    for artist in sorted(artists_missing):

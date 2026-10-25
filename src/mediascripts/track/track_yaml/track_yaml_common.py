@@ -1,19 +1,23 @@
-"""Shared metadata loading, comparison rules, scanning, and CLI for track YAML scripts."""
+"""Shared metadata comparison, scanning, atomic writes, diffs, and CLI for track YAML scripts."""
 
 import argparse
 import logging
 import os
 import re
-from collections.abc import Callable, Mapping
+import shutil
+import stat
+import tempfile
+from collections.abc import Callable, Iterator, Mapping
+from difflib import unified_diff
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import mutagen
 from dataclass_wizard.v0.errors import JSONWizardError
-from mediascan.track_data import TrackData
-from mediascan.track_yaml_file import TrackYamlFile
-from mediascan.track_yaml_file_loader import load_track_yaml_file
-from mediascan.utils.path.album_path import AlbumPathBuilder
+from mediascan.types.track.track_data import TrackData
+from mediascan.types.track.track_yaml_file import TrackYamlFile
+from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
+from mediascan.types.album.album_path import AlbumPathBuilder
 from mutagen.easyid3 import EasyID3
 from yaml import YAMLError
 
@@ -28,6 +32,64 @@ TAG_FIELDS = {
     "year": "date",
 }
 TRACK_ERRORS = (OSError, UnicodeError, YAMLError, JSONWizardError, ValueError, TypeError, mutagen.MutagenError)
+
+
+class TextWriter(Protocol):
+    def write(self, text: str, /) -> int: ...
+
+
+def save_yaml_atomically(
+    yaml_path: Path, write: Callable[[TextWriter], None], backup_path: Path | None = None,
+) -> None:
+    """Stage YAML beside its source, preserve permissions, and replace atomically."""
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=yaml_path.parent,
+            prefix=f".{yaml_path.name}.", suffix=".tmp", delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            write(stream)
+        temporary_path.chmod(stat.S_IMODE(yaml_path.stat().st_mode))
+        if backup_path is not None:
+            shutil.copy2(yaml_path, backup_path)
+        os.replace(temporary_path, yaml_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def format_field_diff(field: str, original: str, updated: str, updated_label: str) -> str:
+    return f"  {field}: Track YAML = {original}; {updated_label} = {updated}"
+
+
+def show_yaml_file_diff(path: Path, original: str, proposed: str) -> None:
+    """Print a unified diff, including explicit missing-final-newline markers."""
+    lines = unified_diff(
+        original.splitlines(keepends=True), proposed.splitlines(keepends=True),
+        fromfile=str(path), tofile=f"{path} (proposed)",
+    )
+    for line in lines:
+        print(line, end="" if line.endswith("\n") else "\n", flush=True)
+        if not line.endswith("\n"):
+            print("\\ No newline at end of file", flush=True)
+
+
+def report_walk_error(error: OSError) -> None:
+    raise error
+
+
+def iter_collection_files(
+    path: Path, album_directories_only: bool = True,
+    onerror: Callable[[OSError], None] = report_walk_error,
+) -> Iterator[Path]:
+    """Walk library symlinks, optionally restricting files to album directories."""
+    for root, _, filenames in os.walk(path, followlinks=True, onerror=onerror):
+        directory = Path(root)
+        if album_directories_only and not AlbumPathBuilder.of(directory).valid:
+            continue
+        for filename in sorted(filenames):
+            yield directory / filename
 
 
 def load_track_metadata(track_path: Path) -> tuple[TrackData, EasyID3] | None:
@@ -63,6 +125,10 @@ def tag_values(tags: EasyID3, field: str) -> list[str]:
     return values
 
 
+def track_field_values(track_data: TrackData, tags: EasyID3, field: str) -> tuple[str, list[str]]:
+    return str(getattr(track_data, field)).strip(), tag_values(tags, field)
+
+
 def process_collection(
     collection_data_path: Path, track_handler: Callable[[Path, bool], bool],
     quiet: bool = False, album_directories_only: bool = True,
@@ -74,17 +140,10 @@ def process_collection(
         matches = False
         logger.error("Could not scan collection: %s", error)
 
-    for root, _, filenames in os.walk(
-        collection_data_path, followlinks=True, onerror=report_walk_error
-    ):
-        album_path = Path(root)
-        if album_directories_only and not AlbumPathBuilder.of(album_path).valid:
-            continue
-        for filename in sorted(filenames):
-            track_path = album_path / filename
-            if track_path.suffix.lower() == ".mp3":
-                if not track_handler(track_path, quiet):
-                    matches = False
+    for track_path in iter_collection_files(collection_data_path, album_directories_only, report_walk_error):
+        if track_path.suffix.lower() == ".mp3":
+            if not track_handler(track_path, quiet):
+                matches = False
     return matches
 
 

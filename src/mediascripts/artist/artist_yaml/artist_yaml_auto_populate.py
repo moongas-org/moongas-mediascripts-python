@@ -47,10 +47,11 @@ from typing import Optional
 from openai import APIStatusError, OpenAI
 from tqdm import tqdm
 
-from mediascan.artist_yaml_file_validator import (
+from mediascan.types.artist.artist_yaml_file_validator import (
     validate_artist_yaml_file,
 )
-from mediascripts.artist.artist_yaml.artist_yaml_helpers import (
+from mediascripts.artist.artist_yaml.artist_yaml_common import (
+    clean_backup_files,
     load_input_files,
     load_reference_examples,
     remove_duplicate_members_lists,
@@ -355,14 +356,7 @@ def clean():
         "Cleaning up backup files in the collection: %s",
         collection_data_path,
     )
-    count_removed = 0
-    for backup_file in collection_data_path.rglob("*.bak"):
-        try:
-            backup_file.unlink()
-            count_removed += 1
-            logger.info("Removed backup file: %s", backup_file)
-        except Exception as e:
-            logger.warning("Failed to remove backup file %s: %s", backup_file, e)
+    count_removed = clean_backup_files(collection_data_path, continue_on_error=True)
     logger.info("Removed a total of %d backup file(s)", count_removed)
 
 

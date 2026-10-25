@@ -8,8 +8,8 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 
-from mediascan.media_file_data import MediaFileData
-from mediascan.media_files_yaml_file_loader import load_media_files_yaml_file
+from mediascan.types.media_file.media_file_data import MediaFileData
+from mediascan.types.media_files.media_files_yaml_file_loader import load_media_files_yaml_file
 
 """
 mediastats.py

@@ -63,7 +63,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import mutagen
-from mediascan.utils.path.album_path import AlbumPathBuilder
+from mediascan.types.album.album_path import AlbumPathBuilder
 from tqdm import tqdm
 
 from mediascripts.common.cli.parse_boolean import parse_boolean

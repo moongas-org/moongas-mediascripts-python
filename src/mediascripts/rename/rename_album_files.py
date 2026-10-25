@@ -17,7 +17,7 @@ import os
 import re
 from pathlib import Path
 
-from mediascan.utils.path.album_path import AlbumPath, AlbumPathBuilder
+from mediascan.types.album.album_path import AlbumPath, AlbumPathBuilder
 
 MOONGAS_COLLECTION_ROOTDIR = os.environ.get(
     "MOONGAS_COLLECTION_ROOTDIR", "../../moongas-collection-demo"

@@ -64,6 +64,13 @@ python -m pip install -e ".[dev,llm,stats]"
 
 # Usage
 
+The current source targets the reorganized sibling `moongas-mediascan-python`
+API: metadata types and YAML helpers under `mediascan.types`, and database
+loading under `mediascan.utils.db.mediascan_db_loader`. When developing against
+that sibling checkout, install its current source into the same environment
+(`pip install -e ../moongas-mediascan-python`); an older installed wheel may
+still use the previous module layout.
+
 The `mediascripts` package installs a console script named `mediascripts` so it can be executed either with `python -m mediascripts` or simply with `mediascripts`.
 
 ```bash
@@ -115,7 +122,92 @@ stats:
 track:
   compare-track-yaml-with-media-file
   merge-track-yaml-with-media-file
+  track-yaml-auto-populate
 ```
+
+## Auto-Populate Track YAML
+
+The track YAML commands share collection scanning, atomic file writes, and
+field-diff formatting through
+[`track_yaml_common.py`](./src/mediascripts/track/track_yaml/track_yaml_common.py).
+
+Install the LLM extras (`pip install -e '.[llm]'`) and configure an
+OpenAI-compatible provider using `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
+The existing `GITHUB_MODELS_BASE_URL`, `GITHUB_TOKEN`, and `GITHUB_MODEL`
+fallbacks are also supported, as for artist YAML auto-population.
+
+```bash
+track-yaml-auto-populate
+track-yaml-auto-populate --file "/path/to/01 - Song.yml" --force
+track-yaml-auto-populate --dir "/path/to/music" --sleep 10
+track-yaml-auto-populate --dir "/path/to/music" --dry-run
+track-yaml-auto-populate --count 10
+track-yaml-auto-populate --llm=false
+track-yaml-auto-populate --dir "/path/to/music" --clean
+track-yaml-auto-populate --revert --dry-run
+track-yaml-auto-populate --revert
+```
+
+By default, scans existing `.yml`/`.yaml` files in album directories beneath
+`$MOONGAS_COLLECTION_ROOTDIR/data`, following library symlinks. `--dir` scans
+any directory recursively; `--file` processes just one file. Artist, album,
+and collection index YAML files are excluded. No media files are changed and
+missing sidecars are not created.
+
+Uses the mediascan `TrackYamlFile` schema: `trackData` contains `title`, `artist`,
+`albumartist`, `album`, `genre`, and integer `year`; optional `trackIdData` is a
+**list** of identifier mappings supporting ISRC, Spotify, Apple Music, YouTube
+Music/video, Amazon Music, Tidal, and Deezer. Tracks with valid core metadata and
+at least one non-empty identifier or URL are skipped unless `--force` is used.
+Nested `fpcalcData` (audio duration and fingerprint) is accepted and preserved,
+but does not by itself count as a streaming identifier. The LLM cannot add or
+change audio fingerprint data.
+Up to three complete files in the selected scope serve as reference examples.
+Pending tracks are shuffled and processed once per run, with 30 seconds between
+requests by default. `--llm=false` only checks files, without creating a client
+or changing anything.
+
+`-n` / `--dry-run` requests updates from the LLM, validates the responses, and
+shows the proposed diffs without modifying source files or backups.
+Each changed result prints a shell-quoted `meld` command. In dry-run mode, the
+proposal is retained in a private temporary YAML file so the command remains
+usable after the script exits; remove that file when finished reviewing.
+Normal runs compare the backup against the updated source.
+Normal completion checks, `--force`, and request pacing still apply; this mode
+uses provider credentials and may incur API charges. Use `--llm=false` instead
+to check files without making requests.
+With `--clean`, it logs which backups would be deleted without deleting them.
+With `--revert`, it previews restoration without modifying either file.
+
+`--revert` restores track `.yml.bak` files in album directories, replacing each
+corresponding `.yml` file and consuming the backup. Replacement is atomic, so a
+failed rename does not first delete the current file. Missing `.yml` files are
+restored too. It follows library directory symlinks but rejects symlink backups.
+It never restores `album.yml`, `artist.yml`, or collection index YAML files,
+even with `--file`. `--dir` limits the scan; `--file` selects one track `.yml`
+in an album directory. This mode exits without contacting the LLM, is mutually
+exclusive with `--clean`, and is not limited by `--count`.
+
+`-c` / `--count VALUE` limits processing to at most that many eligible tracks.
+Skipped complete tracks do not count; failed attempts do. The default is
+unlimited, and `--count 0` makes no LLM requests. The limit also applies to
+dry-run previews, but does not limit backup cleanup with `--clean`.
+
+Responses must pass schema validation and preserve existing non-empty metadata
+and identifiers before being saved atomically. Unquoted decimal service IDs
+returned by the model are converted to strings, preserving their original digits
+(including leading zeros); other invalid identifier types are rejected with the
+field path and offending value. Before saving, changed fields
+are displayed with their `Track YAML` and `LLM Result` values, including indexed
+identifier fields such as `trackIdData[0].spotifyId`. A unified file-content diff
+also shows the original/proposed filenames, context lines, and `-`/`+` YAML
+lines, including during dry-run. This is informational;
+no interactive confirmation is required. Changed files get a sibling
+`.yml.bak`/`.yaml.bak` backup. `--clean` removes only track YAML backups in the
+selected scope and exits. LLM results still require human review: schema checks
+cannot establish that a suggested streaming identifier belongs to the recording.
+Exit status is 0 on success, 1 for errors, or 130 if interrupted.
+Also runs as `python -m mediascripts.track.track_yaml.track_yaml_auto_populate`.
 
 ## Compare Track YAML with MP3 Tags
 

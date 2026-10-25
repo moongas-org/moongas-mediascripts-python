@@ -1,25 +1,50 @@
+"""Shared artist YAML discovery, validation, cleanup, and CLI helpers."""
+
+import argparse
 import re
 import logging
 import os
 from pathlib import Path
 from dataclass_wizard.v0.errors import MissingFields
-from mediascan.artist_yaml_file import ArtistYamlFile
-from mediascan.artist_yaml_file_validator import (
+from mediascan.types.artist.artist_yaml_file import ArtistYamlFile
+from mediascan.types.artist.artist_yaml_file_validator import (
     validate_artist_yaml_content,
 )
+from mediascan.types.media_files.media_files_yaml_file_loader import load_media_files_yaml_file
 
-# Configure with LOG_LEVEL=DEBUG for additional diagnostic detail.
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger(__name__)
 
+EXCLUDE_DIRS = ["Various Artists"]
 
-def load_reference_examples(
-    collection_data_path: Path, letters_dirs_to_work: list[str]
-) -> str:
+
+def excluded(path: Path) -> bool:
+    return any(directory in str(path) for directory in EXCLUDE_DIRS)
+
+
+def add_files_yaml_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--files-yaml-path",
+        default="../../out/files.yml",
+        help="Path to the files YAML file (default: %(default)s)",
+    )
+
+
+def load_artist_paths(files_yaml_path: Path | str) -> dict[str, Path]:
+    files = load_media_files_yaml_file(files_yaml_path)
+    artist_paths: dict[str, Path] = {}
+    for file in files.files:
+        if file.artist not in artist_paths:
+            artist_paths[file.artist] = Path(file.path).parent.parent
+    print(f"loaded {len(artist_paths)} artist paths from mediafiles yaml")
+    return artist_paths
+
+
+def print_artist_yaml_summary(total: int, missing: int, missing_label: str) -> None:
+    print(f"Found artist.yml for {total - missing} out of {total} artist folders")
+    print(f"{missing_label}: {missing}")
+
+
+def load_reference_examples(collection_data_path: Path, letters_dirs_to_work: list[str]) -> str:
     """Load complete YAML files that demonstrate the desired output format.
     Currently it recursively loads all artist.yaml files under the EXAMPLES_ROOTDIR
     Only files named "artist.yml" in directories starting with "A" are considered.
@@ -33,29 +58,12 @@ def load_reference_examples(
     )
 
     if not collection_data_path.is_dir():
-        logger.warning(
-            "Reference examples directory not found: %s", collection_data_path
-        )
+        logger.warning("Reference examples directory not found: %s", collection_data_path)
         return ""
     else:
         logger.info("Reference examples directory found: %s", collection_data_path)
 
-    example_paths: list[str] = []
-
-    for root, _, filenames in os.walk(collection_data_path, followlinks=True):
-        logger.info(
-            "Contents of collection_data_path: %s", os.listdir(collection_data_path)
-        )
-
-        base_name = os.path.basename(root)
-        logger.info("Checking root: %s, base_name: %s", root, base_name)
-
-        # Ensure the directory name is not empty and starts with a target letter
-        if base_name and base_name[0].upper() in letters_dirs_to_work:
-            for filename in filenames:
-                if filename == "artist.yml":
-                    example_paths.append(str(Path(root) / filename))
-                    logger.info("Added example file: %s", str(Path(root) / filename))
+    example_paths = load_input_files(collection_data_path, letters_dirs_to_work)
 
     logger.info("Found %d reference example file(s)", len(example_paths))
 
@@ -66,9 +74,7 @@ def load_reference_examples(
             examples.append(f"Example: {filename}\n{f.read()}")
     logger.info(
         "Loaded reference example file(s): %s",
-        ", ".join(
-            sorted(os.path.relpath(p, collection_data_path) for p in example_paths)
-        ),
+        ", ".join(sorted(os.path.relpath(p, collection_data_path) for p in example_paths)),
     )
 
     logger.info(
@@ -81,16 +87,13 @@ def load_reference_examples(
     return reference_text
 
 
-def load_input_files(
-    collection_data_path: Path, letters_dirs_to_work: list[str]
-) -> list[Path]:
+def load_input_files(collection_data_path: Path, letters_dirs_to_work: list[str]) -> list[Path]:
     """Find artist.yml files in directories selected by their first letter."""
     input_paths = [
         Path(root) / filename
         for root, _, filenames in os.walk(collection_data_path, followlinks=True)
         for filename in filenames
-        if filename == "artist.yml"
-        and os.path.basename(root)[0].upper() in letters_dirs_to_work
+        if filename == "artist.yml" and os.path.basename(root) and os.path.basename(root)[0].upper() in letters_dirs_to_work
     ]
 
     input_paths = sorted(input_paths)
@@ -100,19 +103,23 @@ def load_input_files(
     return input_paths
 
 
-def clean_backup_files(collection_data_path: Path) -> int:
+def clean_backup_files(collection_data_path: Path, continue_on_error: bool = False) -> int:
     """Delete all backup files beneath the collection root directory."""
     deleted_count = 0
     for backup_path in collection_data_path.rglob("*.bak"):
-        if not backup_path.is_file():
+        if not continue_on_error and not backup_path.is_file():
             continue
-        backup_path.unlink()
+        try:
+            backup_path.unlink()
+        except OSError as exception:
+            if not continue_on_error:
+                raise
+            logger.warning("Failed to remove backup file %s: %s", backup_path, exception)
+            continue
         deleted_count += 1
         logger.info("Deleted backup file: %s", backup_path)
 
-    logger.info(
-        "Deleted %d backup file(s) beneath %s", deleted_count, collection_data_path
-    )
+    logger.info("Deleted %d backup file(s) beneath %s", deleted_count, collection_data_path)
     return deleted_count
 
 
@@ -123,8 +130,7 @@ def try_load_artist_yaml_for_skip(input_path: Path) -> bool:
         return True
     except MissingFields as exception:
         logger.warning(
-            "Artist YAML requires LLM processing: %s is missing fields %s; "
-            "rescued raw data: %s",
+            "Artist YAML requires LLM processing: %s is missing fields %s; rescued raw data: %s",
             input_path,
             exception.missing_fields,
             exception.obj,
@@ -154,9 +160,7 @@ def validate_llm_yaml_content(content: str, filename: str) -> None:
 
 def remove_duplicate_members_lists(content: str) -> str:
     """Merge duplicate direct ``members`` lists under ``artistData``."""
-    artist_data_match = re.search(
-        r"^(?P<indent>[ \t]*)artistData:[ \t]*$", content, re.MULTILINE
-    )
+    artist_data_match = re.search(r"^(?P<indent>[ \t]*)artistData:[ \t]*$", content, re.MULTILINE)
     if artist_data_match is None:
         return content
 
@@ -170,9 +174,7 @@ def remove_duplicate_members_lists(content: str) -> str:
         return content
 
     member_indent = first_member_match.group("indent")
-    member_key = re.compile(
-        rf"^{re.escape(member_indent)}members:(?:[ \t]+[^#]*)?[ \t]*$"
-    )
+    member_key = re.compile(rf"^{re.escape(member_indent)}members:(?:[ \t]+[^#]*)?[ \t]*$")
     lines = content.splitlines(keepends=True)
     artist_data_line = content[: artist_data_match.start()].count("\n")
     found_members = False

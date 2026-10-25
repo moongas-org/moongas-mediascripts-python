@@ -22,7 +22,7 @@ from mediascripts.track.track_yaml.track_yaml_common import (
     TRACK_ERRORS,
     load_track_metadata,
     run_cli,
-    tag_values,
+    track_field_values,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,8 +42,7 @@ def compare_track(track_path: Path, quiet: bool = False) -> bool:
 
     matches = True
     for field, tag in TAG_FIELDS.items():
-        expected = str(getattr(track_data, field)).strip()
-        actual = tag_values(tags, field)
+        expected, actual = track_field_values(track_data, tags, field)
         if actual != [expected]:
             matches = False
             logger.warning(

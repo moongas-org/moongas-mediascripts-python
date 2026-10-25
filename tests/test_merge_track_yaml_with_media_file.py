@@ -328,7 +328,7 @@ def test_failed_yaml_save_preserves_original_and_cleans_temporary_file(
     def fail_replace(source: Path, destination: Path) -> None:
         raise PermissionError("Cannot replace YAML")
 
-    monkeypatch.setattr(merge.os, "replace", fail_replace)
+    monkeypatch.setattr("mediascripts.track.track_yaml.track_yaml_common.os.replace", fail_replace)
     assert not merge.merge_track(track)
     assert "Cannot replace YAML" in caplog.text
     assert track.with_suffix(".yml").read_bytes() == before

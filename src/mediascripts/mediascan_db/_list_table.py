@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import pandas as pd
-from mediascan.mediascan_db_loader import load_db
+from mediascan.utils.db.mediascan_db_loader import load_db
 
 
 def list_table(table: Literal["artist", "album", "mediafile"]) -> None:

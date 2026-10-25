@@ -13,11 +13,8 @@ Exit status: 0 if resolved, 1 if skipped/errors, 130 if interrupted.
 """
 
 import logging
-import os
 import re
-import stat
 import sys
-import tempfile
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Protocol, cast
@@ -29,21 +26,20 @@ from ruamel.yaml.error import YAMLError
 from mediascripts.track.track_yaml.track_yaml_common import (
     TAG_FIELDS,
     TRACK_ERRORS,
+    TextWriter,
+    format_field_diff,
     load_track_metadata,
     run_cli,
-    tag_values,
+    save_yaml_atomically,
+    track_field_values,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class _TextWriter(Protocol):
-    def write(self, text: str, /) -> int: ...
-
-
 class _RoundTripYaml(Protocol):
     def load(self, stream: Path) -> object: ...
-    def dump(self, data: Mapping[str, object], stream: _TextWriter) -> None: ...
+    def dump(self, data: Mapping[str, object], stream: TextWriter) -> None: ...
 
 
 class _TagWriter(Protocol):
@@ -64,7 +60,7 @@ def read_choice(prompt: str) -> str:
 
 
 def prompt_resolution(track_path: Path, field: str, expected: str, actual: list[str]) -> str:
-    print(f"\n{track_path}\n  {field}: Track YAML = {expected!r}; Media File Tags = {actual!r}")
+    print(f"\n{track_path}\n" + format_field_diff(field, repr(expected), repr(actual), "Media File Tags"))
     while True:
         choice = read_choice(
             "[y] Accept Track YAML (default)  [m] Accept Media File Tags  [e] Enter value  [s] Skip: "
@@ -97,19 +93,7 @@ def save_yaml_value(yaml_path: Path, field: str, value: str | int) -> None:
     if not isinstance(data, MutableMapping):
         raise ValueError("Expected a trackData mapping")
     cast(MutableMapping[str, object], data)[field] = value
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=yaml_path.parent,
-            prefix=f".{yaml_path.name}.", suffix=".tmp", delete=False,
-        ) as stream:
-            temporary_path = Path(stream.name)
-            round_trip_yaml.dump(document, stream)
-        temporary_path.chmod(stat.S_IMODE(yaml_path.stat().st_mode))
-        os.replace(temporary_path, yaml_path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+    save_yaml_atomically(yaml_path, lambda stream: round_trip_yaml.dump(document, stream))
 
 
 def merge_track(track_path: Path, quiet: bool = False) -> bool:
@@ -122,8 +106,7 @@ def merge_track(track_path: Path, quiet: bool = False) -> bool:
         resolved = True
         differences = False
         for field, tag in TAG_FIELDS.items():
-            expected = str(getattr(track_data, field)).strip()
-            actual = tag_values(tags, field)
+            expected, actual = track_field_values(track_data, tags, field)
             if actual == [expected]:
                 continue
             differences = True
