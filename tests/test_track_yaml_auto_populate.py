@@ -70,7 +70,7 @@ def test_full_acoustid_response_is_accepted_and_preserved() -> None:
         + "      results:\n"
         + "        - id: match-1\n"
         + "          score: 0.9\n"
-        + "          recordings: [{id: recording-1}]\n"
+        + "          recordings: [{id: recording-1, isrcs: [USSM18500120]}]\n"
     )
     document = populate.validate_track_yaml_content(content)
     completed = populate.validate_track_yaml_content(content + "    spotifyId: example\n")

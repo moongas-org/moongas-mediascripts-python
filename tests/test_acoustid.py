@@ -21,8 +21,15 @@ FINGERPRINT = (
 RESULT = {
     "status": "ok",
     "results": [
-        {"id": "match-1", "score": 0.9, "recordings": [{"id": "recording-1"}, {"id": "recording-2"}]},
-        {"id": "match-2", "score": 0.8, "recordings": [{"id": "recording-1"}]},
+        {
+            "id": "match-1",
+            "score": 0.9,
+            "recordings": [
+                {"id": "recording-1", "isrcs": ["USSM18500120", "GBARL8500001"]},
+                {"id": "recording-2", "isrcs": []},
+            ],
+        },
+        {"id": "match-2", "score": 0.8, "recordings": [{"id": "recording-1", "isrcs": ["USSM18500120"]}]},
     ],
 }
 
@@ -74,7 +81,7 @@ def test_lookup_saves_full_response_or_leaves_dry_run_untouched(
         "client": [KEY],
         "duration": ["203"],
         "fingerprint": ["AQADtE-example"],
-        "meta": ["recordingids"],
+        "meta": ["recordingids", "isrcs"],
         "format": ["json"],
     }
     assert http_mock.call_args.kwargs["timeout"] == 30
@@ -412,6 +419,8 @@ def test_saved_response_loads_with_mediascan_schema(track: Path, http_mock: Magi
     assert data.results[0].id == "match-1"
     assert data.results[0].score == 0.9
     assert data.results[0].recordings[0].id == "recording-1"
+    assert data.results[0].recordings[0].isrcs == ["USSM18500120", "GBARL8500001"]
+    assert data.results[0].recordings[1].isrcs == []
 
 
 def test_changed_source_is_not_overwritten(track: Path, http_mock: MagicMock) -> None:
@@ -558,3 +567,25 @@ def test_cli_sleep(track: Path, monkeypatch: pytest.MonkeyPatch, http_mock: Magi
     monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track), "--sleep", "1.5"])
     assert acoustid.main() == 0
     assert run.call_args.args[-1] == 1.5
+
+
+def test_request_asks_for_recording_ids_and_isrcs(track: Path, http_mock: MagicMock) -> None:
+    assert acoustid.run(KEY, specific_file=track)
+    assert "&meta=recordingids&meta=isrcs&" in http_mock.call_args.args[0].full_url
+
+
+def test_missing_isrcs_default_to_empty_list(track: Path, http_mock: MagicMock) -> None:
+    response = {"status": "ok", "results": [{"id": "match-1", "score": 0.9, "recordings": [{"id": "recording-1"}]}]}
+    http_mock.return_value = HttpResponse(json.dumps(response).encode())
+    assert acoustid.run(KEY, specific_file=track)
+    saved = YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"]
+    assert saved["results"][0]["recordings"] == [{"id": "recording-1", "isrcs": []}]
+
+
+@pytest.mark.parametrize("isrcs", ['"USSM18500120"', "[1]", '[""]', "null"])
+def test_invalid_isrcs_never_save(track: Path, http_mock: MagicMock, isrcs: str) -> None:
+    body = '{"status": "ok", "results": [{"id": "m", "score": 1, "recordings": [{"id": "r", "isrcs": ' + isrcs + "}]}]}"
+    http_mock.return_value = HttpResponse(body.encode())
+    original = track.read_bytes()
+    assert not acoustid.run(KEY, specific_file=track)
+    assert track.read_bytes() == original

@@ -93,7 +93,7 @@ response is replaced only when it changes.
 All returned matches, scores, recording data, and additional response fields are
 retained; no best-match selection is implied.
 
-The script calls AcoustID over HTTPS with `meta=recordingids`, pacing requests
+The script calls AcoustID over HTTPS with `meta=recordingids&meta=isrcs`, pacing requests
 below the service's three-per-second limit within a single process. `--sleep`
 sets the minimum seconds between requests; it defaults to `1/3 + 0.01`
 (about 0.343) and rejects smaller values. Avoid running
@@ -109,7 +109,9 @@ available for review; remove their temporary directories when finished.
 
 The entire successful API response is saved as `acoustidData` (the YAML spelling
 of `TrackIdData.acoustid_data`) alongside `fpcalcData` in the matching
-`trackIdData` entry. Only this portion is updated; existing metadata,
+`trackIdData` entry. Each recording keeps its `isrcs` list; if AcoustID omits
+it, an empty list is stored so the data matches the mediascan schema. Only this
+portion is updated; existing metadata,
 fingerprints, legacy identifier lists, other entries, and YAML comments are
 preserved. `track-yaml-auto-populate` accepts and preserves this response.
 Changed

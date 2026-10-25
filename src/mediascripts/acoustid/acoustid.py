@@ -38,7 +38,9 @@ class _Yaml(Protocol):
 
 
 def is_mapping(value: object) -> TypeGuard[dict[str, object]]:
-    return isinstance(value, dict) and all(isinstance(key, str) for key in cast(dict[object, object], value))
+    return isinstance(value, dict) and all(
+        isinstance(key, str) for key in cast(dict[object, object], value)
+    )
 
 
 def is_list(value: object) -> TypeGuard[list[object]]:
@@ -74,17 +76,25 @@ def log_response_body(body: bytes, api_key: str) -> None:
             body.decode("utf-8", errors="replace"),
         )
     else:
-        log(logging.INFO, api_key, "AcoustID raw response JSON:\n%s", json.dumps(result, indent=2))
+        log(
+            logging.INFO,
+            api_key,
+            "AcoustID raw response JSON:\n%s",
+            json.dumps(result, indent=2),
+        )
 
 
 def lookup(api_key: str, duration: int, fingerprint: str) -> dict[str, object]:
-    params: dict[str, str | int] = {
-        "client": api_key,
-        "duration": duration,
-        "fingerprint": fingerprint,
-        "meta": "recordingids",
-        "format": "json",
-    }
+    params: list[tuple[str, str | int]] = [
+        ("client", api_key),
+        ("duration", duration),
+        ("fingerprint", fingerprint),
+        ("meta", "recordingids"),
+        ("meta", "releases"),
+        ("meta", "releasegroups"),
+        ("meta", "isrcs"),
+        ("format", "json"),
+    ]
     request = Request(
         f"{LOOKUP_URL}?{urlencode(params)}",
         headers={"User-Agent": "moongas-mediascripts/1.2.1"},
@@ -109,7 +119,9 @@ def lookup(api_key: str, duration: int, fingerprint: str) -> dict[str, object]:
         log_response_body(body, api_key)
         raise ValueError(f"AcoustID returned HTTP {error.code}") from None
     except (URLError, TimeoutError, OSError) as error:
-        raise ValueError(f"AcoustID request failed: {redact(str(error), api_key)}") from None
+        raise ValueError(
+            f"AcoustID request failed: {redact(str(error), api_key)}"
+        ) from None
     result: object = json.loads(body)
     if not is_mapping(result):
         raise ValueError("AcoustID response must be a JSON object")
@@ -120,21 +132,39 @@ def lookup(api_key: str, duration: int, fingerprint: str) -> dict[str, object]:
 
 
 def validate_response(result: Mapping[str, object]) -> None:
+    """Validate a lookup response, defaulting omitted recording ISRC lists to []."""
     matches = result.get("results")
     if not is_list(matches):
         raise ValueError("AcoustID results must be a list")
     for match in matches:
-        if not is_mapping(match) or not isinstance(match.get("id"), str) or not match["id"]:
+        if (
+            not is_mapping(match)
+            or not isinstance(match.get("id"), str)
+            or not match["id"]
+        ):
             raise ValueError("AcoustID match must have a non-empty string ID")
         recordings: object = match.get("recordings", [])
         if not is_list(recordings):
             raise ValueError("AcoustID recordings must be a list")
         for recording in recordings:
-            if not is_mapping(recording) or not isinstance(recording.get("id"), str) or not recording["id"]:
+            if (
+                not is_mapping(recording)
+                or not isinstance(recording.get("id"), str)
+                or not recording["id"]
+            ):
                 raise ValueError("AcoustID recording must have a non-empty string ID")
+            isrcs = recording.setdefault("isrcs", [])
+            if not is_list(isrcs) or not all(
+                isinstance(isrc, str) and isrc for isrc in isrcs
+            ):
+                raise ValueError(
+                    "AcoustID recording ISRCs must be a list of non-empty strings"
+                )
 
 
-def fingerprint_entries(document: dict[str, object], path: Path, api_key: str) -> list[tuple[dict[str, object], int, str]]:
+def fingerprint_entries(
+    document: dict[str, object], path: Path, api_key: str
+) -> list[tuple[dict[str, object], int, str]]:
     identifiers: object = document.get("trackIdData", [])
     if identifiers is None:
         identifiers = []
@@ -185,7 +215,9 @@ def fingerprint_entries(document: dict[str, object], path: Path, api_key: str) -
     return entries
 
 
-def track_files(specific_file: Path | None, specific_dir: Path | None) -> Iterator[Path]:
+def track_files(
+    specific_file: Path | None, specific_dir: Path | None
+) -> Iterator[Path]:
     if specific_file is not None:
         if (
             not specific_file.is_file()
@@ -198,12 +230,17 @@ def track_files(specific_file: Path | None, specific_dir: Path | None) -> Iterat
     if specific_dir is None:
         root = os.environ.get("MOONGAS_COLLECTION_ROOTDIR")
         if not root:
-            raise ValueError("MOONGAS_COLLECTION_ROOTDIR must be set, or use --file/--dir")
+            raise ValueError(
+                "MOONGAS_COLLECTION_ROOTDIR must be set, or use --file/--dir"
+            )
         specific_dir = Path(root) / "data"
     if not specific_dir.is_dir():
         raise ValueError(f"Input directory does not exist: {specific_dir}")
     for path in iter_collection_files(specific_dir, album_directories_only=False):
-        if path.suffix.lower() in {".yml", ".yaml"} and path.stem.lower() not in RESERVED_NAMES:
+        if (
+            path.suffix.lower() in {".yml", ".yaml"}
+            and path.stem.lower() not in RESERVED_NAMES
+        ):
             yield path
 
 
@@ -236,7 +273,9 @@ def run(
             document = yaml.load(original)
             if not is_mapping(document) or not is_mapping(document.get("trackData")):
                 if specific_file is not None:
-                    raise ValueError("Expected a track YAML document with a trackData mapping")
+                    raise ValueError(
+                        "Expected a track YAML document with a trackData mapping"
+                    )
                 log(
                     logging.DEBUG,
                     api_key,
@@ -266,7 +305,12 @@ def run(
                 if last_request is not None:
                     delay = max(0, sleep - (time.monotonic() - last_request))
                     if delay > 0:
-                        log(logging.INFO, api_key, "Sleeping %.3f second(s) before next AcoustID request", delay)
+                        log(
+                            logging.INFO,
+                            api_key,
+                            "Sleeping %.3f second(s) before next AcoustID request",
+                            delay,
+                        )
                         time.sleep(delay)
                 last_request = time.monotonic()
                 result = lookup(api_key, duration, fingerprint)
@@ -275,7 +319,9 @@ def run(
                     changed = True
             if changed:
                 if path.read_text(encoding="utf-8") != original:
-                    raise ValueError("Track YAML changed during lookup; refusing to overwrite")
+                    raise ValueError(
+                        "Track YAML changed during lookup; refusing to overwrite"
+                    )
                 stream = StringIO()
                 yaml.dump(document, stream)
                 proposed = stream.getvalue()
@@ -283,7 +329,9 @@ def run(
                     raise ValueError("Refusing to save YAML containing the API key")
 
                 if dry_run:
-                    proposal_dir = Path(tempfile.mkdtemp(prefix="acoustid-proposal-", dir="/tmp"))
+                    proposal_dir = Path(
+                        tempfile.mkdtemp(prefix="acoustid-proposal-", dir="/tmp")
+                    )
                     proposal_path = proposal_dir / path.name
                     try:
                         with proposal_path.open("x", encoding="utf-8") as output:
@@ -299,7 +347,9 @@ def run(
                         path,
                         proposal_path,
                     )
-                    command = shlex.join(["meld", str(path.resolve()), str(proposal_path)])
+                    command = shlex.join(
+                        ["meld", str(path.resolve()), str(proposal_path)]
+                    )
                     print(redact(command, api_key), flush=True)
                     continue
 
@@ -315,7 +365,9 @@ def run(
                     path,
                     path,
                 )
-                command = shlex.join(["meld", str(backup_path.resolve()), str(path.resolve())])
+                command = shlex.join(
+                    ["meld", str(backup_path.resolve()), str(path.resolve())]
+                )
                 print(redact(command, api_key), flush=True)
             else:
                 log(logging.INFO, api_key, "[%s] AcoustID response unchanged", path)
@@ -332,7 +384,9 @@ def sleep_seconds(value: str) -> float:
     except ValueError:
         raise argparse.ArgumentTypeError(f"invalid number: {value!r}") from None
     if not math.isfinite(seconds) or seconds < MIN_SLEEP:
-        raise argparse.ArgumentTypeError(f"must be a finite number of seconds >= {MIN_SLEEP:g}")
+        raise argparse.ArgumentTypeError(
+            f"must be a finite number of seconds >= {MIN_SLEEP:g}"
+        )
     return seconds
 
 
@@ -340,7 +394,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--file", type=Path, help="Process one track YAML file.")
-    scope.add_argument("-d", "--dir", type=Path, help="Recursively scan this directory.")
+    scope.add_argument(
+        "-d", "--dir", type=Path, help="Recursively scan this directory."
+    )
     parser.add_argument(
         "-c",
         "--count",
@@ -367,10 +423,24 @@ def main() -> int:
     args = parser.parse_args()
     if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     api_key = os.environ.get("ACOUSTID_API_KEY", "")
     try:
-        return 0 if run(api_key, args.file, args.dir, args.count, args.dry_run, args.force, args.sleep) else 1
+        return (
+            0
+            if run(
+                api_key,
+                args.file,
+                args.dir,
+                args.count,
+                args.dry_run,
+                args.force,
+                args.sleep,
+            )
+            else 1
+        )
     except YAML_ERRORS as error:
         log(logging.ERROR, api_key, "%s", error)
         return 1
