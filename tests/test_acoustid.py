@@ -179,7 +179,7 @@ def test_multiple_fingerprints_count_as_one_track_and_are_rate_limited(
     assert http_mock.call_count == 2
     acoustid.time.sleep.assert_called_once()
     delay = acoustid.time.sleep.call_args.args[0]
-    assert delay == pytest.approx(acoustid.REQUEST_INTERVAL - 0.1)
+    assert delay == pytest.approx(acoustid.MIN_SLEEP - 0.1)
     assert delay > 1 / 3 - 0.1
     entries = YAML(typ="safe").load(track.read_text())["trackIdData"]
     assert all(entry["acoustidData"] == RESULT for entry in entries)
@@ -425,7 +425,18 @@ def test_changed_source_is_not_overwritten(track: Path, http_mock: MagicMock) ->
     assert not track.with_name(track.name + ".bak").exists()
 
 
-@pytest.mark.parametrize("arguments", [["--count", "-1"], ["--file", "a.yml", "--dir", "directory"]])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--count", "-1"],
+        ["--file", "a.yml", "--dir", "directory"],
+        ["--sleep", "0.3"],
+        ["--sleep", "-1"],
+        ["--sleep", "nan"],
+        ["--sleep", "inf"],
+        ["--sleep", "abc"],
+    ],
+)
 def test_invalid_cli_arguments(monkeypatch: pytest.MonkeyPatch, arguments: list[str]) -> None:
     monkeypatch.setattr(sys, "argv", ["acoustid", *arguments])
     with pytest.raises(SystemExit) as error:
@@ -497,3 +508,53 @@ def test_cli_force(track: Path, monkeypatch: pytest.MonkeyPatch, http_mock: Magi
     monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track), "--force"])
     assert acoustid.main() == 0
     http_mock.assert_called_once()
+
+
+def test_custom_sleep_is_used_between_requests(
+    track: Path,
+    http_mock: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    track.write_text(CORE + FINGERPRINT + "  - fpcalcData:\n      duration: 204\n      fingerprint: SECOND\n")
+    http_mock.side_effect = lambda *args, **kwargs: HttpResponse(json.dumps(RESULT).encode())
+    monkeypatch.setattr(acoustid.time, "monotonic", MagicMock(side_effect=[10, 10.1, 12.1]))
+    with caplog.at_level(logging.INFO):
+        assert acoustid.run(KEY, specific_file=track, sleep=2)
+    assert acoustid.time.sleep.call_args.args[0] == pytest.approx(1.9)
+    assert "Sleeping 1.900 second(s) before next AcoustID request" in caplog.text
+
+
+def test_no_sleep_or_sleep_log_when_interval_already_elapsed(
+    track: Path,
+    http_mock: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    track.write_text(CORE + FINGERPRINT + "  - fpcalcData:\n      duration: 204\n      fingerprint: SECOND\n")
+    http_mock.side_effect = lambda *args, **kwargs: HttpResponse(json.dumps(RESULT).encode())
+    monkeypatch.setattr(acoustid.time, "monotonic", MagicMock(side_effect=[10, 15, 15]))
+    with caplog.at_level(logging.INFO):
+        assert acoustid.run(KEY, specific_file=track)
+    assert http_mock.call_count == 2
+    acoustid.time.sleep.assert_not_called()
+    assert "Sleeping" not in caplog.text
+
+
+@pytest.mark.parametrize("sleep", [0, 1 / 3, float("nan"), float("inf")])
+def test_run_rejects_invalid_sleep(track: Path, http_mock: MagicMock, sleep: float) -> None:
+    with pytest.raises(ValueError, match="sleep"):
+        acoustid.run(KEY, specific_file=track, sleep=sleep)
+    http_mock.assert_not_called()
+
+
+def test_cli_sleep(track: Path, monkeypatch: pytest.MonkeyPatch, http_mock: MagicMock) -> None:
+    run = MagicMock(return_value=True)
+    monkeypatch.setattr(acoustid, "run", run)
+    monkeypatch.setenv("ACOUSTID_API_KEY", KEY)
+    monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track)])
+    assert acoustid.main() == 0
+    assert run.call_args.args[-1] == acoustid.MIN_SLEEP
+    monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track), "--sleep", "1.5"])
+    assert acoustid.main() == 0
+    assert run.call_args.args[-1] == 1.5

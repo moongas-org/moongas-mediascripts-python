@@ -94,7 +94,9 @@ All returned matches, scores, recording data, and additional response fields are
 retained; no best-match selection is implied.
 
 The script calls AcoustID over HTTPS with `meta=recordingids`, pacing requests
-below the service's three-per-second limit within a single process. Avoid running
+below the service's three-per-second limit within a single process. `--sleep`
+sets the minimum seconds between requests; it defaults to `1/3 + 0.01`
+(about 0.343) and rejects smaller values. Avoid running
 multiple instances against the same API key. Each request's method, full URL,
 headers, and timeout are logged, together with the HTTP status and full response
 JSON pretty-printed with two-space indentation (including HTTP error bodies).

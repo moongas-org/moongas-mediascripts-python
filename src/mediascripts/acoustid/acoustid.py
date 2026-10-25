@@ -27,7 +27,7 @@ from mediascripts.track.track_yaml.track_yaml_common import (
 
 logger = logging.getLogger(__name__)
 LOOKUP_URL = "https://api.acoustid.org/v2/lookup"
-REQUEST_INTERVAL = 1 / 3 + 0.01
+MIN_SLEEP = 1 / 3 + 0.01
 YAML_ERRORS = (OSError, UnicodeError, YAMLError, ValueError, TypeError)
 RESERVED_NAMES = {"artist", "artists", "album", "files"}
 
@@ -214,9 +214,12 @@ def run(
     count: int | None = None,
     dry_run: bool = False,
     force: bool = False,
+    sleep: float = MIN_SLEEP,
 ) -> bool:
     if not api_key.strip():
         raise ValueError("ACOUSTID_API_KEY must be set")
+    if not math.isfinite(sleep) or sleep < MIN_SLEEP:
+        raise ValueError(f"sleep must be a finite number of seconds >= {MIN_SLEEP:g}")
     if count is not None and count < 0:
         raise ValueError("count must be non-negative")
     succeeded = True
@@ -261,7 +264,10 @@ def run(
             changed = False
             for entry, duration, fingerprint in entries:
                 if last_request is not None:
-                    time.sleep(max(0, REQUEST_INTERVAL - (time.monotonic() - last_request)))
+                    delay = max(0, sleep - (time.monotonic() - last_request))
+                    if delay > 0:
+                        log(logging.INFO, api_key, "Sleeping %.3f second(s) before next AcoustID request", delay)
+                        time.sleep(delay)
                 last_request = time.monotonic()
                 result = lookup(api_key, duration, fingerprint)
                 if entry.get("acoustidData") != result:
@@ -320,6 +326,16 @@ def run(
     return succeeded
 
 
+def sleep_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid number: {value!r}") from None
+    if not math.isfinite(seconds) or seconds < MIN_SLEEP:
+        raise argparse.ArgumentTypeError(f"must be a finite number of seconds >= {MIN_SLEEP:g}")
+    return seconds
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     scope = parser.add_mutually_exclusive_group()
@@ -342,13 +358,19 @@ def main() -> int:
         action="store_true",
         help="Also look up fingerprints that already have non-empty acoustidData.",
     )
+    parser.add_argument(
+        "--sleep",
+        type=sleep_seconds,
+        default=MIN_SLEEP,
+        help=f"Minimum seconds between API requests (default and minimum: {MIN_SLEEP:g}).",
+    )
     args = parser.parse_args()
     if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     api_key = os.environ.get("ACOUSTID_API_KEY", "")
     try:
-        return 0 if run(api_key, args.file, args.dir, args.count, args.dry_run, args.force) else 1
+        return 0 if run(api_key, args.file, args.dir, args.count, args.dry_run, args.force, args.sleep) else 1
     except YAML_ERRORS as error:
         log(logging.ERROR, api_key, "%s", error)
         return 1
