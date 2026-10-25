@@ -42,7 +42,8 @@ def camel_case(name: str) -> str:
 
 
 CORE_FIELDS = {field.name for field in fields(TrackData)}
-ID_FIELDS = {camel_case(field.name) for field in fields(TrackIdData)} - {"fpcalcData"}
+ID_FIELDS = {camel_case(field.name) for field in fields(TrackIdData)} - {"fpcalcData", "acoustidData"}
+ID_LIST_FIELDS = {"acoustidIds", "musicbrainzRecordingIds"}
 FPCALC_FIELDS = {camel_case(field.name) for field in fields(TrackFpCalcData)}
 YAML_ERRORS = (OSError, UnicodeError, YAMLError, ValueError, TypeError)
 
@@ -60,6 +61,10 @@ URLs, or facts. Omit fields you cannot establish; do not use placeholder strings
 trackIdData must be a list of mappings, never a single mapping.
 An entry may also contain fpcalcData with duration (number) and fingerprint (string).
 Preserve existing fpcalcData exactly; never invent or infer audio fingerprints or durations.
+An entry may contain acoustidData holding the entire AcoustID API response.
+Preserve acoustidData exactly; never invent or modify API response data.
+Preserve existing acoustidIds and musicbrainzRecordingIds string lists exactly.
+Do not invent or add AcoustID matches or MusicBrainz recording identifiers.
 Do not add media-file-specific fields such as format or bitrate.
 """
 
@@ -145,11 +150,19 @@ def validate_track_yaml_content(content: str) -> dict[str, object]:
         if not is_list(identifiers):
             raise ValueError("trackIdData must be a list")
         for index, entry in enumerate(identifiers):
-            if not is_mapping(entry) or entry.keys() - (ID_FIELDS | {"fpcalcData"}):
+            if not is_mapping(entry) or entry.keys() - (ID_FIELDS | ID_LIST_FIELDS | {"fpcalcData", "acoustidData"}):
                 raise ValueError(
                     "trackIdData entries must contain only supported identifier fields"
                 )
             for key, value in entry.items():
+                if key == "acoustidData":
+                    if value is not None and not is_mapping(value):
+                        raise ValueError(f"trackIdData[{index}].acoustidData must be a mapping or null")
+                    continue
+                if key in ID_LIST_FIELDS:
+                    if not is_list(value) or any(not isinstance(item, str) or not item.strip() for item in value):
+                        raise ValueError(f"trackIdData[{index}].{key} must be a list of non-empty strings")
+                    continue
                 if key == "fpcalcData":
                     if value is not None:
                         if not is_mapping(value) or value.keys() - FPCALC_FIELDS:
@@ -175,7 +188,11 @@ def has_identifiers(document: Mapping[str, object]) -> bool:
     identifiers = document.get("trackIdData")
     return is_list(identifiers) and any(
         is_mapping(entry)
-        and any(key in ID_FIELDS and isinstance(value, str) and value.strip() for key, value in entry.items())
+        and any(
+            (key in ID_FIELDS and isinstance(value, str) and bool(value.strip()))
+            or (key in ID_LIST_FIELDS and is_list(value) and bool(value))
+            for key, value in entry.items()
+        )
         for entry in identifiers
     )
 

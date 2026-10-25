@@ -56,6 +56,37 @@ def test_fingerprint_data_round_trips_but_is_not_a_streaming_identifier() -> Non
     ]
 
 
+def test_acoustid_identifier_lists_are_valid_and_count_as_identifiers() -> None:
+    content = CORE + FINGERPRINT_IDS + "    acoustidIds: [match-1]\n    musicbrainzRecordingIds: [recording-1]\n"
+    document = populate.validate_track_yaml_content(content)
+    assert populate.has_identifiers(document)
+
+
+def test_full_acoustid_response_is_accepted_and_preserved() -> None:
+    content = (
+        CORE + FINGERPRINT_IDS
+        + "    acoustidData:\n"
+        + "      status: ok\n"
+        + "      results:\n"
+        + "        - id: match-1\n"
+        + "          score: 0.9\n"
+        + "          recordings: [{id: recording-1}]\n"
+    )
+    document = populate.validate_track_yaml_content(content)
+    completed = populate.validate_track_yaml_content(content + "    spotifyId: example\n")
+    populate.preserve_existing_values(document, completed)
+    assert "acoustidData" not in populate.ID_FIELDS
+    modified = populate.validate_track_yaml_content(content.replace("score: 0.9", "score: 0.1"))
+    with pytest.raises(ValueError, match="changed existing track identifiers"):
+        populate.preserve_existing_values(document, modified)
+
+
+@pytest.mark.parametrize("value", ["null", "123", "match-1", "[123]", "['']"])
+def test_acoustid_identifier_lists_reject_invalid_values(value: str) -> None:
+    with pytest.raises(ValueError, match="acoustidIds"):
+        populate.validate_track_yaml_content(CORE + f"trackIdData:\n  - acoustidIds: {value}\n")
+
+
 def test_existing_fingerprint_is_preserved_when_adding_service_id(track: Path) -> None:
     original = CORE + FINGERPRINT_IDS
     track.write_text(original)

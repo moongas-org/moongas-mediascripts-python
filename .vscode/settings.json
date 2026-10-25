@@ -53,6 +53,7 @@
     ],
     "python.analysis.stubPath": "typings",
     "python.analysis.exclude": [
+        "typings/essentia-stubs",
         "**/__pycache__",
         "**/.env*",
         "**/.git",

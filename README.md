@@ -61,8 +61,61 @@ python -m pip install -e ".[dev,llm,stats]"
 
 - `[dev]` - development dependencies (includes `pytest` and `ruff`)
 - `[stats]` - statistics script dependencies (includes `matplotlib` and `numpy`)
+- `[essentia]` - Essentia audio feature extraction (`pip install -e '.[essentia]'`)
 
 # Usage
+
+### AcoustID fingerprint lookup
+
+Set `ACOUSTID_API_KEY` to your AcoustID client API key, then run:
+
+```bash
+acoustid                         # all track YAML files under $MOONGAS_COLLECTION_ROOTDIR/data
+acoustid --dir /path/to/album     # recursively scan one directory
+acoustid --file "/path/to/01 - Track.yml"
+acoustid --count 10 --dry-run     # query up to 10 eligible tracks without writing
+acoustid --force --dir /path/to/album  # re-query tracks that already have acoustidData
+python -m mediascripts.acoustid.acoustid --help
+```
+
+`--file` and `--dir` are mutually exclusive. Both `.yml` and `.yaml` files are
+supported; collection metadata files such as `artist.yml`, `album.yml`, and
+`files.yml` are excluded. A track must have a `trackData` mapping and a
+`trackIdData` entry containing `fpcalcData.fingerprint` and a positive numeric
+`fpcalcData.duration` in seconds. Missing fingerprints or invalid durations are
+warned about and skipped; this script does not run `fpcalc`.
+
+`-c` / `--count` limits eligible tracks, not individual requests; zero processes
+none. By default, fingerprint entries that already have non-empty `acoustidData`
+are skipped without a request (logged at INFO), and tracks with nothing left to
+look up don't count toward `--count`. Pass `--force` to query them again; a
+response is replaced only when it changes.
+All returned matches, scores, recording data, and additional response fields are
+retained; no best-match selection is implied.
+
+The script calls AcoustID over HTTPS with `meta=recordingids`, pacing requests
+below the service's three-per-second limit within a single process. Avoid running
+multiple instances against the same API key. Each request's method, full URL,
+headers, and timeout are logged, together with the HTTP status and full response
+JSON pretty-printed with two-space indentation (including HTTP error bodies).
+Invalid JSON is logged verbatim with a warning. The API key is redacted
+throughout. `-n` / `--dry-run` still performs and logs lookups. For each proposed
+change it writes a track YAML file in a unique `/tmp/acoustid-proposal-*`
+directory and prints a shell-quoted `meld` command comparing the existing file
+with the proposal. Source files and backups remain unchanged. Proposals remain
+available for review; remove their temporary directories when finished.
+
+The entire successful API response is saved as `acoustidData` (the YAML spelling
+of `TrackIdData.acoustid_data`) alongside `fpcalcData` in the matching
+`trackIdData` entry. Only this portion is updated; existing metadata,
+fingerprints, legacy identifier lists, other entries, and YAML comments are
+preserved. `track-yaml-auto-populate` accepts and preserves this response.
+Changed
+files are saved atomically with an original-content `.bak` backup, and a
+shell-quoted `meld` command compares the backup against the modified file.
+Successful no-match responses (`results: []`) are saved too; identical responses
+leave files unchanged. Errors are logged and produce a nonzero exit
+status without saving the failed track.
 
 The current source targets the reorganized sibling `moongas-mediascan-python`
 API: metadata types and YAML helpers under `mediascan.types`, and database
