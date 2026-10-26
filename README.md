@@ -75,6 +75,8 @@ acoustid --dir /path/to/album     # recursively scan one directory
 acoustid --file "/path/to/01 - Track.yml"
 acoustid --count 10 --dry-run     # query up to 10 eligible tracks without writing
 acoustid --force --dir /path/to/album  # re-query tracks that already have acoustidData
+acoustid --force --overwrite --dir /path/to/album  # also rewrite unchanged lookup results
+acoustid --dry-run --offline       # print request URLs without contacting AcoustID
 python -m mediascripts.acoustid.acoustid --help
 ```
 
@@ -93,7 +95,8 @@ response is replaced only when it changes.
 All returned matches, scores, recording data, and additional response fields are
 retained; no best-match selection is implied.
 
-The script calls AcoustID over HTTPS with `meta=recordingids&meta=isrcs`, pacing requests
+The script calls AcoustID over HTTPS with
+`meta=recordingids&meta=releases&meta=releasegroups&meta=isrcs`, pacing requests
 below the service's three-per-second limit within a single process. `--sleep`
 sets the minimum seconds between requests; it defaults to `1/3 + 0.01`
 (about 0.343) and rejects smaller values. Avoid running
@@ -106,20 +109,103 @@ change it writes a track YAML file in a unique `/tmp/acoustid-proposal-*`
 directory and prints a shell-quoted `meld` command comparing the existing file
 with the proposal. Source files and backups remain unchanged. Proposals remain
 available for review; remove their temporary directories when finished.
+Add `--offline` (only valid with `--dry-run`) to skip the API entirely: each
+request URL the script would have sent is printed to stdout, with the API key
+replaced by `[REDACTED]`, and no sleeping, proposals, or file changes occur.
+`--count` and the existing-`acoustidData` skip still apply.
 
-The entire successful API response is saved as `acoustidData` (the YAML spelling
+The successful API response is saved as `acoustidData` (the YAML spelling
 of `TrackIdData.acoustid_data`) alongside `fpcalcData` in the matching
-`trackIdData` entry. Each recording keeps its `isrcs` list; if AcoustID omits
-it, an empty list is stored so the data matches the mediascan schema. Only this
-portion is updated; existing metadata,
+`trackIdData` entry. ISRC lists are written independently, without YAML anchors
+or aliases. Strings use the YAML writer's normal quoting rules. Only this portion is updated; existing metadata,
 fingerprints, legacy identifier lists, other entries, and YAML comments are
 preserved. `track-yaml-auto-populate` accepts and preserves this response.
 Changed
 files are saved atomically with an original-content `.bak` backup, and a
 shell-quoted `meld` command compares the backup against the modified file.
 Successful no-match responses (`results: []`) are saved too; identical responses
-leave files unchanged. Errors are logged and produce a nonzero exit
+leave files unchanged unless `--overwrite` is specified. `--overwrite` rewrites
+YAML after a successful lookup even when the response is unchanged, using the
+usual backup and `meld` workflow (or a proposal in dry-run mode). It does not
+force lookups for populated tracks; combine it with `--force` for that.
+Rewriting lets the YAML writer remove unnecessary double quotes, while keeping
+quotes required to preserve string types. Skipped tracks and offline runs are
+not rewritten by this option. Errors are logged and produce a nonzero exit
 status without saving the failed track.
+
+### MusicBrainz recording details
+
+Run `musicbrainz` after `acoustid` to fill in each AcoustID recording's
+MusicBrainz details. These are the optional `TrackAcoustIDRecording` fields
+`title`, `length` (milliseconds), `video`, `disambiguation`, `firstReleaseDate`
+(from MusicBrainz `first-release-date`), and `isrcs`:
+
+```bash
+musicbrainz                         # all track YAML files under $MOONGAS_COLLECTION_ROOTDIR/data
+musicbrainz --file "/path/to/01 - Track.yml" --dry-run
+musicbrainz --dry-run --offline     # print request URLs without contacting MusicBrainz
+musicbrainz --force --overwrite     # rewrite even when recording details are unchanged
+```
+
+It accepts the same `--file`, `--dir`, `-c/--count`, `-n/--dry-run`,
+`--offline`, `--force`, `--overwrite`, and `--sleep` options as `acoustid`. No API key is
+needed. Each recording ID under `trackIdData[].acoustidData.results[].recordings[]`
+whose `isrcs` is missing or empty is requested from
+`https://musicbrainz.org/ws/2/recording/<id>?inc=isrcs&fmt=json`. Recordings
+with no ISRCs in MusicBrainz therefore keep an empty list and are checked again
+on later runs. `--force` also re-queries recordings that already have ISRCs.
+Requests are spaced at least 1.01 seconds apart (MusicBrainz allows one per
+second), and IDs repeated within a run are requested only once. Each HTTP 503
+adds 0.5 seconds of temporary extra sleep between requests; each later 2xx
+response removes 0.1 seconds, down to zero. Requests, pretty-printed responses,
+sleeps, and extra-sleep changes are logged.
+
+Each recording ID gets at most five attempts per run, with the usual sleep
+between them. HTTP errors other than 404, network errors, and invalid responses
+each count as a failed attempt. After five failures that recording is left
+unchanged and the script moves on to the next recording ID. Other recordings in
+the same track are still saved, the ID isn't requested again later in the run,
+and the exit status is nonzero. HTTP 404 is not retried and leaves that
+recording unchanged. Invalid recording IDs are skipped with a warning.
+
+Every field except `id` is replaced from the response; fields MusicBrainz omits
+or returns as `null` are stored as `null` (`isrcs` as `[]`). Other keys are left
+alone, and `id` is never changed, even when MusicBrainz returns a merged
+recording. Saving, `.bak` backups, dry-run proposals
+(`/tmp/musicbrainz-proposal-*`), and `meld` commands work as for `acoustid`. A
+normal run replaces any existing `.bak`, including one written by `acoustid`.
+`--overwrite` also rewrites unchanged recording details after a successful
+lookup, including a result cached earlier in the run. Combine it with `--force`
+to include recordings that already have ISRCs. Normal YAML quoting rules apply;
+unnecessary double quotes are removed on rewrite. Skipped, offline, failed,
+and not-found lookups do not trigger an overwrite.
+
+Logs identify the track, each recording's progress and attempt number, and
+whether its fields changed in memory. The track is saved only after all its
+recording entries finish; `--overwrite` does not save after each response.
+Completion logs explain whether YAML was written, a dry-run proposal was
+created, or no write was needed, and include the `meld` command in the logs as
+well as stdout. Interrupting a track discards its pending in-memory updates;
+previously completed tracks remain saved.
+
+Both lookup scripts expand existing shared ISRC lists even when a recording's
+lookup would otherwise be skipped. Ordinary unquoted string lists are valid
+and do not need repair. Missing optional
+fields remain missing; an explicitly malformed ISRC value is logged and reset
+to `[]`, allowing `musicbrainz` to look it up again. This repair does not consume
+`--count` when no lookup is needed.
+
+If a track YAML cannot be parsed and its `.bak` is a loadable track document,
+the scripts restore that backup before processing it. A missing or invalid
+backup causes an explicit error instead of overwriting the track. Dry runs
+use the backup in memory and leave source files and backups untouched; offline
+mode never writes repairs. Repaired output follows the usual backup/proposal
+and `meld` workflow.
+
+YAML `&id001` defines an anchor and `*id001` references it; these are valid YAML,
+not ISRC strings. Sharing one cached list between recording entries previously
+caused ruamel to emit these references. Each entry now gets an independent list,
+and existing references are expanded without losing their identifiers.
 
 The current source targets the reorganized sibling `moongas-mediascan-python`
 API: metadata types and YAML helpers under `mediascan.types`, and database

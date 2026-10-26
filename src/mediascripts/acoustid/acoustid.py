@@ -11,13 +11,15 @@ import time
 from collections.abc import Iterator, Mapping
 from io import StringIO
 from pathlib import Path
-from typing import Protocol, TypeGuard, cast
+from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, quote_plus, urlencode
 from urllib.request import Request, urlopen
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
+
+from mediascripts.acoustid.recording_yaml import is_list, is_mapping, load_track, normalize_isrcs
 
 from mediascripts.track.track_yaml.track_yaml_common import (
     TextWriter,
@@ -35,16 +37,6 @@ RESERVED_NAMES = {"artist", "artists", "album", "files"}
 class _Yaml(Protocol):
     def load(self, stream: str) -> object: ...
     def dump(self, data: Mapping[str, object], stream: TextWriter) -> None: ...
-
-
-def is_mapping(value: object) -> TypeGuard[dict[str, object]]:
-    return isinstance(value, dict) and all(
-        isinstance(key, str) for key in cast(dict[object, object], value)
-    )
-
-
-def is_list(value: object) -> TypeGuard[list[object]]:
-    return isinstance(value, list)
 
 
 def redact(text: str, api_key: str) -> str:
@@ -84,7 +76,7 @@ def log_response_body(body: bytes, api_key: str) -> None:
         )
 
 
-def lookup(api_key: str, duration: int, fingerprint: str) -> dict[str, object]:
+def build_request(api_key: str, duration: int, fingerprint: str) -> Request:
     params: list[tuple[str, str | int]] = [
         ("client", api_key),
         ("duration", duration),
@@ -95,10 +87,14 @@ def lookup(api_key: str, duration: int, fingerprint: str) -> dict[str, object]:
         ("meta", "isrcs"),
         ("format", "json"),
     ]
-    request = Request(
+    return Request(
         f"{LOOKUP_URL}?{urlencode(params)}",
         headers={"User-Agent": "moongas-mediascripts/1.2.1"},
     )
+
+
+def lookup(api_key: str, duration: int, fingerprint: str) -> dict[str, object]:
+    request = build_request(api_key, duration, fingerprint)
     log(
         logging.INFO,
         api_key,
@@ -132,7 +128,7 @@ def lookup(api_key: str, duration: int, fingerprint: str) -> dict[str, object]:
 
 
 def validate_response(result: Mapping[str, object]) -> None:
-    """Validate a lookup response, defaulting omitted recording ISRC lists to []."""
+    """Validate a lookup response without changing it."""
     matches = result.get("results")
     if not is_list(matches):
         raise ValueError("AcoustID results must be a list")
@@ -153,10 +149,10 @@ def validate_response(result: Mapping[str, object]) -> None:
                 or not recording["id"]
             ):
                 raise ValueError("AcoustID recording must have a non-empty string ID")
-            isrcs = recording.setdefault("isrcs", [])
-            if not is_list(isrcs) or not all(
-                isinstance(isrc, str) and isrc for isrc in isrcs
-            ):
+            isrcs = recording.get("isrcs")
+            if isrcs is None:
+                continue
+            if not is_list(isrcs) or not all(isinstance(isrc, str) and isrc for isrc in isrcs):
                 raise ValueError(
                     "AcoustID recording ISRCs must be a list of non-empty strings"
                 )
@@ -252,9 +248,13 @@ def run(
     dry_run: bool = False,
     force: bool = False,
     sleep: float = MIN_SLEEP,
+    offline: bool = False,
+    overwrite: bool = False,
 ) -> bool:
     if not api_key.strip():
         raise ValueError("ACOUSTID_API_KEY must be set")
+    if offline and not dry_run:
+        raise ValueError("offline mode requires dry run")
     if not math.isfinite(sleep) or sleep < MIN_SLEEP:
         raise ValueError(f"sleep must be a finite number of seconds >= {MIN_SLEEP:g}")
     if count is not None and count < 0:
@@ -268,9 +268,8 @@ def run(
         if path is None:
             break
         try:
-            original = path.read_text(encoding="utf-8")
+            original, document, recovered = load_track(path, dry_run=dry_run or offline)
             yaml = cast(_Yaml, YAML())
-            document = yaml.load(original)
             if not is_mapping(document) or not is_mapping(document.get("trackData")):
                 if specific_file is not None:
                     raise ValueError(
@@ -283,8 +282,9 @@ def run(
                     path,
                 )
                 continue
+            repaired = normalize_isrcs(document) if not offline else False
             entries = fingerprint_entries(document, path, api_key)
-            if not entries:
+            if not entries and not repaired and not recovered:
                 continue
             if not force:
                 pending = [item for item in entries if not item[0].get("acoustidData")]
@@ -297,10 +297,23 @@ def run(
                         len(entries) - len(pending),
                     )
                 entries = pending
-                if not entries:
+                if not entries and not repaired and not recovered:
                     continue
-            processed += 1
-            changed = False
+            if entries:
+                processed += 1
+            if offline:
+                for _, duration, fingerprint in entries:
+                    url = build_request(api_key, duration, fingerprint).full_url
+                    log(
+                        logging.INFO,
+                        api_key,
+                        "[%s] Offline: AcoustID request not sent: GET %s",
+                        path,
+                        url,
+                    )
+                    print(redact(url, api_key), flush=True)
+                continue
+            changed = repaired or recovered
             for entry, duration, fingerprint in entries:
                 if last_request is not None:
                     delay = max(0, sleep - (time.monotonic() - last_request))
@@ -317,7 +330,8 @@ def run(
                 if entry.get("acoustidData") != result:
                     entry["acoustidData"] = result
                     changed = True
-            if changed:
+            if changed or (overwrite and entries):
+                normalize_isrcs(document)
                 if path.read_text(encoding="utf-8") != original:
                     raise ValueError(
                         "Track YAML changed during lookup; refusing to overwrite"
@@ -415,14 +429,26 @@ def main() -> int:
         help="Also look up fingerprints that already have non-empty acoustidData.",
     )
     parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Rewrite YAML after a successful lookup even if the response is unchanged.",
+    )
+    parser.add_argument(
         "--sleep",
         type=sleep_seconds,
         default=MIN_SLEEP,
         help=f"Minimum seconds between API requests (default and minimum: {MIN_SLEEP:g}).",
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="With --dry-run, print each request URL (API key redacted) instead of sending it.",
+    )
     args = parser.parse_args()
     if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative")
+    if args.offline and not args.dry_run:
+        parser.error("--offline requires --dry-run")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
@@ -438,6 +464,8 @@ def main() -> int:
                 args.dry_run,
                 args.force,
                 args.sleep,
+                args.offline,
+                args.overwrite,
             )
             else 1
         )

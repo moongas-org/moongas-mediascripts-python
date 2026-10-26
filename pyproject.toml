@@ -52,6 +52,7 @@ dependencies = [
 [project.scripts]
 mediascripts = "mediascripts.__main__:main"
 acoustid = "mediascripts.acoustid.acoustid:main"
+musicbrainz = "mediascripts.acoustid.musicbrainz:main"
 artist-countries-to-mapgraph-json = "mediascripts.artist.artist_mapgraph.artist_countries_to_mapgraph_json:main"
 artist-csv-to-artist-yaml = "mediascripts.artist.artist_csv_to_yaml.artist_csv_to_artist_yaml:main"
 artist-yaml-auto-populate = "mediascripts.artist.artist_yaml.artist_yaml_auto_populate:main"

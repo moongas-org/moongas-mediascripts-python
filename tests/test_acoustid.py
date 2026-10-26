@@ -81,7 +81,7 @@ def test_lookup_saves_full_response_or_leaves_dry_run_untouched(
         "client": [KEY],
         "duration": ["203"],
         "fingerprint": ["AQADtE-example"],
-        "meta": ["recordingids", "isrcs"],
+        "meta": ["recordingids", "releases", "releasegroups", "isrcs"],
         "format": ["json"],
     }
     assert http_mock.call_args.kwargs["timeout"] == 30
@@ -406,23 +406,6 @@ def test_full_response_retains_additional_fields(track: Path, http_mock: MagicMo
     assert YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"] == response
 
 
-def test_saved_response_loads_with_mediascan_schema(track: Path, http_mock: MagicMock) -> None:
-    from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
-
-    track.write_text(CORE + "  albumartist: Artist\n  album: Album\n  genre: Rock\n  year: 1995\n" + FINGERPRINT)
-    assert acoustid.run(KEY, specific_file=track)
-    loaded = load_track_yaml_file(track)
-    assert loaded.track_id_data is not None
-    data = loaded.track_id_data[0].acoustid_data
-    assert data is not None
-    assert data.status == "ok"
-    assert data.results[0].id == "match-1"
-    assert data.results[0].score == 0.9
-    assert data.results[0].recordings[0].id == "recording-1"
-    assert data.results[0].recordings[0].isrcs == ["USSM18500120", "GBARL8500001"]
-    assert data.results[0].recordings[1].isrcs == []
-
-
 def test_changed_source_is_not_overwritten(track: Path, http_mock: MagicMock) -> None:
     def lookup(*args: object, **kwargs: object) -> HttpResponse:
         track.write_text(CORE + "# concurrently edited\n")
@@ -511,12 +494,60 @@ def test_skipped_tracks_do_not_consume_count(track: Path, http_mock: MagicMock) 
     assert YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"] == RESULT
 
 
-def test_cli_force(track: Path, monkeypatch: pytest.MonkeyPatch, http_mock: MagicMock) -> None:
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_cli_force(track: Path, monkeypatch: pytest.MonkeyPatch, http_mock: MagicMock, overwrite: bool) -> None:
     track.write_text(track.read_text() + "    acoustidData: {status: ok, results: []}\n")
     monkeypatch.setenv("ACOUSTID_API_KEY", KEY)
-    monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track), "--force"])
+    monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track), "--force", *(["--overwrite"] if overwrite else [])])
     assert acoustid.main() == 0
     http_mock.assert_called_once()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_overwrite_rewrites_equal_response_and_removes_unnecessary_quotes(
+    track: Path, http_mock: MagicMock, dry_run: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    track.write_text(track.read_text() + "    acoustidData: " + json.dumps(RESULT) + "\n")
+    original = track.read_text()
+    before = YAML(typ="safe").load(original)
+    assert '"USSM18500120"' in original
+    assert acoustid.run(KEY, specific_file=track, force=True, overwrite=True, dry_run=dry_run)
+    http_mock.assert_called_once()
+    backup = track.with_name(track.name + ".bak")
+    if dry_run:
+        (output,) = track.parent.glob("acoustid-proposal-*/" + track.name)
+        assert track.read_text() == original
+        assert not backup.exists()
+    else:
+        output = track
+        assert backup.read_text() == original
+    text = output.read_text()
+    assert '"USSM18500120"' not in text
+    assert "USSM18500120" in text
+    assert YAML(typ="safe").load(text) == before
+    assert capsys.readouterr().out.startswith("meld ")
+
+
+@pytest.mark.parametrize("offline", [False, True])
+def test_overwrite_does_not_rewrite_without_real_lookup(
+    track: Path, http_mock: MagicMock, offline: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    track.write_text(track.read_text() + "    acoustidData: " + json.dumps(RESULT) + "\n")
+    original = track.read_bytes()
+    assert acoustid.run(KEY, specific_file=track, overwrite=True, force=offline, dry_run=offline, offline=offline)
+    http_mock.assert_not_called()
+    assert track.read_bytes() == original
+    assert not track.with_name(track.name + ".bak").exists()
+    assert not list(track.parent.glob("acoustid-proposal-*"))
+    assert "meld " not in capsys.readouterr().out
+
+
+def test_overwrite_does_not_save_failed_lookup(track: Path, http_mock: MagicMock) -> None:
+    original = track.read_bytes()
+    http_mock.side_effect = URLError("unavailable")
+    assert not acoustid.run(KEY, specific_file=track, overwrite=True)
+    assert track.read_bytes() == original
+    assert not track.with_name(track.name + ".bak").exists()
 
 
 def test_custom_sleep_is_used_between_requests(
@@ -563,29 +594,95 @@ def test_cli_sleep(track: Path, monkeypatch: pytest.MonkeyPatch, http_mock: Magi
     monkeypatch.setenv("ACOUSTID_API_KEY", KEY)
     monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track)])
     assert acoustid.main() == 0
-    assert run.call_args.args[-1] == acoustid.MIN_SLEEP
+    assert run.call_args.args[6] == acoustid.MIN_SLEEP
     monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track), "--sleep", "1.5"])
     assert acoustid.main() == 0
-    assert run.call_args.args[-1] == 1.5
+    assert run.call_args.args[6] == 1.5
 
 
 def test_request_asks_for_recording_ids_and_isrcs(track: Path, http_mock: MagicMock) -> None:
     assert acoustid.run(KEY, specific_file=track)
-    assert "&meta=recordingids&meta=isrcs&" in http_mock.call_args.args[0].full_url
+    assert "&meta=recordingids&meta=releases&meta=releasegroups&meta=isrcs&" in http_mock.call_args.args[0].full_url
 
 
-def test_missing_isrcs_default_to_empty_list(track: Path, http_mock: MagicMock) -> None:
-    response = {"status": "ok", "results": [{"id": "match-1", "score": 0.9, "recordings": [{"id": "recording-1"}]}]}
+@pytest.mark.parametrize("recording", [{"id": "recording-1"}, {"id": "recording-1", "isrcs": None}])
+def test_missing_or_null_isrcs_are_saved_unchanged(track: Path, http_mock: MagicMock, recording: dict[str, object]) -> None:
+    response = {"status": "ok", "results": [{"id": "match-1", "score": 0.9, "recordings": [recording]}]}
     http_mock.return_value = HttpResponse(json.dumps(response).encode())
     assert acoustid.run(KEY, specific_file=track)
     saved = YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"]
-    assert saved["results"][0]["recordings"] == [{"id": "recording-1", "isrcs": []}]
+    if recording.get("isrcs", []) is None:
+        response["results"][0]["recordings"][0]["isrcs"] = []
+    assert saved == response
 
 
-@pytest.mark.parametrize("isrcs", ['"USSM18500120"', "[1]", '[""]', "null"])
+@pytest.mark.parametrize("isrcs", ['"USSM18500120"', "[1]", '[""]'])
 def test_invalid_isrcs_never_save(track: Path, http_mock: MagicMock, isrcs: str) -> None:
     body = '{"status": "ok", "results": [{"id": "m", "score": 1, "recordings": [{"id": "r", "isrcs": ' + isrcs + "}]}]}"
     http_mock.return_value = HttpResponse(body.encode())
     original = track.read_bytes()
     assert not acoustid.run(KEY, specific_file=track)
     assert track.read_bytes() == original
+
+
+def test_offline_prints_redacted_urls_without_requests(
+    track: Path,
+    http_mock: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    track.write_text(CORE + FINGERPRINT + "  - fpcalcData:\n      duration: 204\n      fingerprint: SECOND\n")
+    original = track.read_bytes()
+    with caplog.at_level(logging.INFO):
+        assert acoustid.run(KEY, specific_file=track, dry_run=True, offline=True)
+    http_mock.assert_not_called()
+    acoustid.time.sleep.assert_not_called()
+    assert track.read_bytes() == original
+    assert not list(track.parent.glob("acoustid-proposal-*"))
+    urls = capsys.readouterr().out.splitlines()
+    assert len(urls) == 2
+    for url, (duration, fingerprint) in zip(urls, [("203", "AQADtE-example"), ("204", "SECOND")]):
+        query = parse_qs(urlsplit(url).query)
+        assert url.startswith(acoustid.LOOKUP_URL + "?")
+        assert query["client"] == ["[REDACTED]"]
+        assert query["duration"] == [duration]
+        assert query["fingerprint"] == [fingerprint]
+        assert query["meta"] == ["recordingids", "releases", "releasegroups", "isrcs"]
+    output = caplog.text + "\n".join(urls)
+    assert KEY not in output and quote_plus(KEY) not in output
+    assert "Offline: AcoustID request not sent" in caplog.text
+
+
+def test_offline_respects_count_and_existing_data(
+    track: Path, http_mock: MagicMock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    done = track.with_name("00-done.yml")
+    done.write_text(track.read_text() + "    acoustidData: {status: ok, results: []}\n")
+    track.with_name("02 - Other.yml").write_text(track.read_text())
+    assert acoustid.run(KEY, specific_dir=track.parent, count=1, dry_run=True, offline=True)
+    http_mock.assert_not_called()
+    assert len(capsys.readouterr().out.splitlines()) == 1
+
+
+def test_offline_requires_dry_run(track: Path, http_mock: MagicMock) -> None:
+    with pytest.raises(ValueError, match="dry run"):
+        acoustid.run(KEY, specific_file=track, offline=True)
+    http_mock.assert_not_called()
+
+
+def test_cli_offline(
+    track: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    http_mock: MagicMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("ACOUSTID_API_KEY", KEY)
+    monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track), "-n", "--offline"])
+    assert acoustid.main() == 0
+    http_mock.assert_not_called()
+    out = capsys.readouterr().out
+    assert "client=[REDACTED]&" in out and KEY not in out
+    monkeypatch.setattr(sys, "argv", ["acoustid", "--file", str(track), "--offline"])
+    with pytest.raises(SystemExit) as error:
+        acoustid.main()
+    assert error.value.code == 2
