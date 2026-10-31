@@ -60,6 +60,7 @@ artist-yaml-auto-populate = "mediascripts.artist.artist_yaml.artist_yaml_auto_po
 artist-yaml-reformat = "mediascripts.artist.artist_yaml.artist_yaml_reformat:main"
 artist-yaml-test = "mediascripts.artist.artist_yaml.artist_yaml_test:main"
 track-yaml-auto-populate = "mediascripts.track.track_yaml.track_yaml_auto_populate:main"
+scan-media-files-to-track-yaml = "mediascripts.track.track_yaml.scan_media_files_to_track_yaml:main"
 convert-covers = "mediascripts.convert.convert_covers:main"
 convert-videos = "mediascripts.convert.convert_videos:main"
 compare-track-yaml-with-media-file = "mediascripts.track.track_yaml.compare_track_yaml_with_media_file:main"

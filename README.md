@@ -329,8 +329,36 @@ stats:
 track:
   compare-track-yaml-with-media-file
   merge-track-yaml-with-media-file
+  scan-media-files-to-track-yaml
   track-yaml-auto-populate
 ```
+
+## Scan Media Files into Track YAML
+
+Populate or refresh the `mediaFileData` entry in each track YAML file from a
+matching media file in the same directory:
+
+```bash
+scan-media-files-to-track-yaml
+scan-media-files-to-track-yaml --file "/path/to/Some Song.yml"
+scan-media-files-to-track-yaml --dir "/path/to/music" --count 10
+scan-media-files-to-track-yaml --dir "/path/to/music" --dry-run
+```
+
+By default, the script scans track YAML files under
+`$MOONGAS_COLLECTION_ROOTDIR/data`. It matches media files by basename in the
+same directory, selecting the first readable match in filename order. It
+creates one `mediaFileData` entry if absent and expects no more than one entry
+per track. `path` is stored relative to `MOONGAS_COLLECTION_ROOTDIR` with a
+leading `/` (for example, `/data/Music/Artist/Album/Song.mp3`); the media file
+must be beneath that collection root. Obsolete `albumPath` and `artistPath`
+fields are removed. Size, format, modification time, duration, and tagged
+metadata are updated from the media file; missing tag values fall back to
+`trackData`. Existing `fpcalcData` and `acoustidData` are preserved.
+
+`--count` limits track YAML files processed; zero processes none. `--dry-run`
+prints the proposed diff and a `meld` command without changing source files or
+backups. Normal runs preserve the previous YAML in a `.bak` file.
 
 ## Auto-Populate Track YAML
 
