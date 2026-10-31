@@ -35,7 +35,7 @@ def test_get_access_token_rejects_invalid_payload(monkeypatch: pytest.MonkeyPatc
 def test_get_track_by_isrc_returns_validated_tracks(monkeypatch: pytest.MonkeyPatch) -> None:
     get = MagicMock()
     get.return_value.status_code = 200
-    get.return_value.json.return_value = {"tracks": {"items": [MATCH]}}
+    get.return_value.json.return_value = RAW_API_RESPONSE
     monkeypatch.setattr(spotify.requests, "get", get)
     assert spotify.get_track_by_isrc("US123", "token") == [MATCH]
     assert get.call_args.kwargs["headers"]["Authorization"] == "Bearer token"
@@ -80,10 +80,29 @@ TRACK = (
     "            - id: recording\n"
     "              isrcs: [USABC9500001, USABC9500002]\n"
 )
+RAW_MATCH: dict[str, object] = {
+    "name": "Song",
+    "id": "track-id",
+    "external_urls": {"spotify": "https://open.spotify.com/track/track-id"},
+    "futureTrackField": {"preserved": True},
+}
+RAW_API_RESPONSE: dict[str, object] = {
+    "tracks": {
+        "href": "https://api.spotify.com/v1/search?query=isrc%3AUSABC9500001&type=track",
+        "limit": 5,
+        "next": None,
+        "offset": 0,
+        "previous": None,
+        "total": 1,
+        "items": [RAW_MATCH],
+    },
+    "futureResponseField": {"preserved": True},
+}
 MATCH: spotify.SpotifyTrack = {
     "name": "Song",
     "id": "track-id",
     "external_urls": {"spotify": "https://open.spotify.com/track/track-id"},
+    "api_data": RAW_API_RESPONSE,
 }
 
 
@@ -156,7 +175,7 @@ def test_updates_only_spotify_fields_and_preserves_backup(
         "streamingService": "spotify",
         "trackUrl": MATCH["external_urls"]["spotify"],
         "trackId": MATCH["id"],
-        "apiData": None,
+        "apiData": RAW_API_RESPONSE,
         "isrc": "USABC9500001",
     }
     parent["streamingData"].remove(entry)  # type: ignore[union-attr]
@@ -188,21 +207,26 @@ def test_acoustid_isrcs_create_streaming_entry_when_track_ids_are_absent(
         "streamingService": "spotify",
         "trackUrl": MATCH["external_urls"]["spotify"],
         "trackId": MATCH["id"],
-        "apiData": None,
+        "apiData": RAW_API_RESPONSE,
         "isrc": "USABC9500001",
     }
     assert document["mediaFileData"][0]["fpcalcData"]["fingerprint"] == "example"
 
 
 def test_dry_run_retains_proposal_and_does_not_touch_source_or_backup(
-    track: Path, api: tuple[MagicMock, MagicMock], capsys: pytest.CaptureFixture[str]
+    track: Path,
+    api: tuple[MagicMock, MagicMock],
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     backup = track.with_name(track.name + ".bak")
     backup.write_text("existing backup")
-    assert spotify.run(specific_file=track, dry_run=True)
+    with caplog.at_level(logging.INFO):
+        assert spotify.run(specific_file=track, dry_run=True)
     command = shlex.split(capsys.readouterr().out)
     proposal = Path(command[2])
     assert command[:2] == ["meld", str(track)]
+    assert f"Diff command: meld {shlex.quote(str(track.resolve()))} {shlex.quote(str(proposal))}" in caplog.text
     assert spotify_entry(entries(load(proposal))[0])["trackId"] == "track-id"
     assert track.read_text() == TRACK
     assert backup.read_text() == "existing backup"
@@ -536,7 +560,7 @@ def test_real_request_flow(
     post.return_value.json.return_value = {"access_token": "private-token", "expires_in": 3600}
     get = MagicMock()
     get.return_value.status_code = 200
-    get.return_value.json.return_value = {"tracks": {"items": [MATCH]}}
+    get.return_value.json.return_value = RAW_API_RESPONSE
     monkeypatch.setattr(spotify.requests, "post", post)
     monkeypatch.setattr(spotify.requests, "get", get)
     with caplog.at_level(logging.INFO):

@@ -43,6 +43,7 @@ class SpotifyTrack(TypedDict):
     name: str
     id: str
     external_urls: SpotifyExternalUrls
+    api_data: dict[str, object]
 
 
 class SpotifyHTTPError(ValueError):
@@ -148,7 +149,12 @@ def get_track_by_isrc(isrc: str, access_token: str) -> list[SpotifyTrack]:
             raise ValueError("Spotify track must have a string name and non-empty string ID")
         if not isinstance(spotify_url, str) or spotify_url != f"https://open.spotify.com/track/{track_id}":
             raise ValueError("Spotify track must have a Spotify track URL matching its ID")
-        result.append({"name": name, "id": track_id, "external_urls": {"spotify": spotify_url}})
+        result.append({
+            "name": name,
+            "id": track_id,
+            "external_urls": {"spotify": spotify_url},
+            "api_data": payload,
+        })
     return result
 
 
@@ -349,6 +355,7 @@ def store_spotify_data(
     isrc: str,
     track_id: str,
     track_url: str,
+    api_data: dict[str, object],
 ) -> bool:
     streaming_data_value = entry.get("streamingData")
     if streaming_data_value is None:
@@ -364,12 +371,14 @@ def store_spotify_data(
     ]
     if spotify_entries:
         spotify_entry = spotify_entries[0]
-        changed = spotify_entry.get("trackId") != track_id or spotify_entry.get("trackUrl") != track_url
+        changed = (
+            spotify_entry.get("trackId") != track_id
+            or spotify_entry.get("trackUrl") != track_url
+            or spotify_entry.get("apiData") != api_data
+        )
         spotify_entry["trackId"] = track_id
         spotify_entry["trackUrl"] = track_url
-        if "apiData" not in spotify_entry:
-            changed = True
-        spotify_entry.setdefault("apiData", None)
+        spotify_entry["apiData"] = api_data
         if not spotify_entry.get("isrc"):
             spotify_entry["isrc"] = isrc
             changed = True
@@ -378,7 +387,7 @@ def store_spotify_data(
             "streamingService": "spotify",
             "trackUrl": track_url,
             "trackId": track_id,
-            "apiData": None,
+            "apiData": api_data,
             "isrc": isrc,
         })
         changed = True
@@ -488,6 +497,7 @@ def run(
                         source_isrc,
                         match["id"],
                         match["external_urls"]["spotify"],
+                        match["api_data"],
                     ) or changed
                     break
             if not changed and not (overwrite and lookup_succeeded):
@@ -515,6 +525,7 @@ def run(
                     path, proposal_path,
                 )
                 command = shlex.join(["meld", str(path.resolve()), str(proposal_path)])
+                logger.info("[%s] Diff command: %s", path, command)
             else:
                 def write(output: TextWriter) -> None:
                     output.write(proposed)

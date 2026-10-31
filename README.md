@@ -159,9 +159,10 @@ followed by distinct ISRCs in
 trimmed, uppercased, and stripped of hyphens without changing source ISRCs.
 The first ISRC returning a match wins; if Spotify returns multiple tracks, the
 first result is used. A `streamingData` entry with `streamingService: spotify`,
-`trackId`, `trackUrl`, `apiData: null`, and the source `isrc` is added to the
-scalar `trackIdData` mapping. If ISRCs are available only in `mediaFileData`,
-they are associated with that mapping, which is created if needed.
+`trackId`, `trackUrl`, the complete search response in `apiData`, and the source
+`isrc` is added to the scalar `trackIdData` mapping. If ISRCs are available only
+in `mediaFileData`, they are associated with that mapping, which is created if
+needed.
 Spotify response payloads, track metadata, and source ISRC values are not
 modified. Malformed YAML is reported, not restored from backups, so unrelated
 fields cannot be changed through automatic recovery.
