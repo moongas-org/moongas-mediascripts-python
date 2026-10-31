@@ -7,7 +7,7 @@ import pandas as pd
 from mediascan.utils.db.mediascan_db_loader import load_db
 
 
-def list_table(table: Literal["artist", "album", "mediafile"]) -> None:
+def list_table(table: Literal["artist", "album", "mediafile", "track", "trackstreaming"]) -> None:
     parser = argparse.ArgumentParser(
         description=f"Lists all contents of the {table} table in the active collection's mediascan.db."
     )

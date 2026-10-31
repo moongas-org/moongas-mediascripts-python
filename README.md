@@ -274,8 +274,8 @@ not ISRC strings. Sharing one cached list between recording entries previously
 caused ruamel to emit these references. Each entry now gets an independent list,
 and existing references are expanded without losing their identifiers.
 
-The current source targets the reorganized sibling `moongas-mediascan-python`
-API: metadata types and YAML helpers under `mediascan.types`, and database
+The current source targets `mediascan` 1.2.4 or newer: metadata types and YAML
+helpers under `mediascan.types`, and database
 loading under `mediascan.utils.db.mediascan_db_loader`. When developing against
 that sibling checkout, install its current source into the same environment
 (`pip install -e ../moongas-mediascan-python`); an older installed wheel may
@@ -302,10 +302,9 @@ The `--list` option may be used to list all console scripts and shell scripts in
 $ mediascripts --list
 artist:
   artist-countries-to-mapgraph-json
-  artist-csv-to-artist-yaml
   artist-yaml-auto-populate
-  artist-yaml-reformat-with-files-yaml
-  artist-yaml-test-with-files-yaml
+  artist-yaml-reformat
+  artist-yaml-test
   list-missing-region-names
 convert:
   convert-covers
@@ -317,18 +316,16 @@ dev:
   generate-dataclasses
 lyrics:
   lyrics-text-auto-populate
-media_files_yaml:
-  list-artists-from-files-yaml
-  play-rand-file-from-files-yaml
 mediascan_db:
   list-albums
   list-artists
   list-mediafiles
+  list-tracks
+  list-trackstreaming
 rename:
   rename-album-files
 stats:
   genre-clusters
-  mediastats
 track:
   compare-track-yaml-with-media-file
   merge-track-yaml-with-media-file
@@ -501,18 +498,23 @@ Set `MOONGAS_COLLECTION_ROOTDIR` to the active Moongas collection, then run:
 list-artists
 list-albums
 list-mediafiles
+list-tracks
+list-trackstreaming
 ```
 
 These scripts use the `mediascan` library to open
 `$MOONGAS_COLLECTION_ROOTDIR/mediascan.db` and print every row and column of the
-`artist`, `album`, and `mediafile` tables, respectively, without modifying the
-database. All headers and values are left-aligned, with no row, column, or value
-truncation. The collection variable and an existing database file are required.
+`artist`, `album`, `mediafile`, `track`, and `trackstreaming` tables,
+respectively, without modifying the database. All headers and values are
+left-aligned, with no row, column, or value truncation. The collection variable
+and an existing database file are required.
 
 The modules can also be run with
 `python -m mediascripts.mediascan_db.list_artists`,
 `python -m mediascripts.mediascan_db.list_albums`, or
-`python -m mediascripts.mediascan_db.list_mediafiles`.
+`python -m mediascripts.mediascan_db.list_mediafiles`,
+`python -m mediascripts.mediascan_db.list_tracks`, or
+`python -m mediascripts.mediascan_db.list_trackstreaming`.
 
 ## `scan-to-album-yaml` - Create Album YAML Files
 

@@ -15,7 +15,7 @@ jiter==0.17.0
 joblib==1.6.0
 kiwisolver==1.5.1
 matplotlib==3.11.2
-mediascan==1.2.1
+mediascan==1.2.4
 mediatest==1.2.1
 mutagen==1.48.1
 narwhals==2.26.0

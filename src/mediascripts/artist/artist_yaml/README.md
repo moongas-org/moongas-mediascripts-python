@@ -1,9 +1,28 @@
 # artist_yaml
 
-Shared discovery, artist-path loading, exclusions, backup cleanup, validation,
-and CLI helpers live in [artist_yaml_common.py](./artist_yaml_common.py).
-The auto-populate, reformat, and validation scripts import these helpers rather
-than maintaining separate implementations.
+Shared discovery, exclusions, backup cleanup, and validation helpers live in
+[artist_yaml_common.py](./artist_yaml_common.py). The auto-populate script uses
+these helpers rather than maintaining separate implementations.
+
+## Database-backed artist workflows
+
+`artist-yaml-reformat` and `artist-yaml-test` use artist names and directories
+from the `artist` table in
+`$MOONGAS_COLLECTION_ROOTDIR/mediascan.db`. Set that variable to the active
+collection directory before running either command.
+
+```bash
+artist-yaml-reformat
+artist-yaml-reformat --reformat-all
+artist-yaml-test
+artist-yaml-test --source-path /data/Music
+```
+
+The reformatter applies the built-in city/region corrections, or rewrites all
+artist YAML files with `--reformat-all`. The validator checks each database
+artist's `artist.yml` file and reports YAML files found under the source paths
+that are not associated with a database artist. Repeat `--source-path` to scan
+multiple media roots.
 
 ## artist_yaml_auto_populate.py
 
@@ -17,7 +36,6 @@ This Python script automates the process of completing and validating missing fi
 
 * **LLM-Powered Auto-Population:** Leverages an OpenAI-compatible API (such as GitHub Models or OpenAI) to fill in missing fields based on strict system instructions and reference examples.
 * **Few-Shot Learning:** Uses completed YAML files from the `A` directory (`LETTER_DIRS_FOR_REFERENCE_EXAMPLES`) as schema and content references to guide the model for files in directories `B` through `Z`.
-* **Pre-Pass Cleaning:** Automatically scans and cleans duplicate `members` lists under `artistData` across all collection files before running the processing loop.
 * **Safe File Handling:** 
   * Creates a `.bak` backup file alongside the original before overwriting.
   * Writes updates atomically using temporary files (`tempfile.NamedTemporaryFile`) to prevent data corruption.
@@ -31,7 +49,7 @@ This Python script automates the process of completing and validating missing fi
 | :--- | :--- | :--- |
 | `--clean` | *None* | Deletes all `.bak` backup files in the collection root and exits immediately. |
 | `--sleep` | `INT` | Specifies the number of seconds to pause between processing loops (default: `30`). |
-| `--llm` | `true/false` | Enables or disables LLM lookups (default: `true`). Use `--llm=false` for dry-run or pre-pass cleanup only. |
+| `--llm` | `true/false` | Enables or disables LLM lookups (default: `true`). Use `--llm=false` to check files without changing them. |
 | `--file` | `PATH` | Process a single specific artist YAML file instead of scanning all directories. |
 | `--force` | *None* | Force processing of all files, ignoring the pre-pass duplicate check and validation check. |
 ---

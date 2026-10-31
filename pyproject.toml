@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mediascripts"
-version = "1.2.1"
+version = "1.2.4"
 requires-python = ">=3.11"
 authors = [{ name = "moongas.org", email = "moongas.org@gmail.com" }]
 maintainers = [{ name = "moongas.org", email = "moongas.org@gmail.com" }]
@@ -41,7 +41,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "mediascan >= 1.2.1",
+  "mediascan >= 1.2.4",
   "mediatest >= 1.2.1",
   "mutagen>=1.47.0",
   "readchar>=4.2.1",
@@ -56,11 +56,10 @@ acoustid = "mediascripts.acoustid.acoustid:main"
 musicbrainz = "mediascripts.acoustid.musicbrainz:main"
 spotify = "mediascripts.spotify.spotify:main"
 artist-countries-to-mapgraph-json = "mediascripts.artist.artist_mapgraph.artist_countries_to_mapgraph_json:main"
-artist-csv-to-artist-yaml = "mediascripts.artist.artist_csv_to_yaml.artist_csv_to_artist_yaml:main"
 artist-yaml-auto-populate = "mediascripts.artist.artist_yaml.artist_yaml_auto_populate:main"
+artist-yaml-reformat = "mediascripts.artist.artist_yaml.artist_yaml_reformat:main"
+artist-yaml-test = "mediascripts.artist.artist_yaml.artist_yaml_test:main"
 track-yaml-auto-populate = "mediascripts.track.track_yaml.track_yaml_auto_populate:main"
-artist-yaml-reformat-with-files-yaml = "mediascripts.artist.artist_yaml.artist_yaml_reformat_with_files_yaml:main"
-artist-yaml-test-with-files-yaml = "mediascripts.artist.artist_yaml.artist_yaml_test_with_files_yaml:main"
 convert-covers = "mediascripts.convert.convert_covers:main"
 convert-videos = "mediascripts.convert.convert_videos:main"
 compare-track-yaml-with-media-file = "mediascripts.track.track_yaml.compare_track_yaml_with_media_file:main"
@@ -70,13 +69,13 @@ generate-dataclasses = "mediascripts.dev.generate_dataclasses:main"
 genre-clusters = "mediascripts.stats.genre_clusters:main"
 list-albums = "mediascripts.mediascan_db.list_albums:main"
 list-artists = "mediascripts.mediascan_db.list_artists:main"
-list-artists-from-files-yaml = "mediascripts.media_files_yaml.list_artists_from_files_yaml:main"
 list-mediafiles = "mediascripts.mediascan_db.list_mediafiles:main"
+list-tracks = "mediascripts.mediascan_db.list_tracks:main"
+list-trackstreaming = "mediascripts.mediascan_db.list_trackstreaming:main"
 lyrics-text-auto-populate = "mediascripts.lyrics.lyrics_text.lyrics_text_auto_populate:main"
 list-missing-region-names = "mediascripts.artist.artist_mapgraph.list_missing_region_names:main"
 make-covers-video = "mediascripts.convert.make_covers_video:main"
-mediastats = "mediascripts.stats.mediastats:main"
-play-rand-file-from-files-yaml = "mediascripts.media_files_yaml.play_rand_file_from_files_yaml:main"
+
 rename-album-files = "mediascripts.rename.rename_album_files:main"
 
 [project.optional-dependencies]

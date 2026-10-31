@@ -8,6 +8,8 @@ import pytest
 from mediascripts.mediascan_db.list_albums import main as list_albums
 from mediascripts.mediascan_db.list_artists import main as list_artists
 from mediascripts.mediascan_db.list_mediafiles import main as list_mediafiles
+from mediascripts.mediascan_db.list_tracks import main as list_tracks
+from mediascripts.mediascan_db.list_trackstreaming import main as list_trackstreaming
 
 
 @pytest.fixture
@@ -21,7 +23,13 @@ def collection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.mark.parametrize(
     ("main", "table"),
-    [(list_artists, "artist"), (list_albums, "album"), (list_mediafiles, "mediafile")],
+    [
+        (list_artists, "artist"),
+        (list_albums, "album"),
+        (list_mediafiles, "mediafile"),
+        (list_tracks, "track"),
+        (list_trackstreaming, "trackstreaming"),
+    ],
 )
 def test_lists_entire_table(
     collection: Path,
@@ -33,7 +41,7 @@ def test_lists_entire_table(
     # Many rows and long values expose accidental truncation in the printed table.
     long_value = "value_" + "x" * 100
     with sqlite3.connect(db_path) as connection:
-        for name in ("artist", "album", "mediafile"):
+        for name in ("artist", "album", "mediafile", "track", "trackstreaming"):
             connection.execute(f"CREATE TABLE {name} (id INTEGER, name TEXT, details TEXT)")
             # :03d formats an integer with at least three digits, e.g. artist_000.
             # Each ? is a SQL parameter filled from the corresponding tuple.
@@ -142,7 +150,13 @@ def test_empty_table(collection: Path, capsys: pytest.CaptureFixture[str]) -> No
 
 @pytest.mark.parametrize(
     ("main", "table"),
-    [(list_artists, "artist"), (list_albums, "album"), (list_mediafiles, "mediafile")],
+    [
+        (list_artists, "artist"),
+        (list_albums, "album"),
+        (list_mediafiles, "mediafile"),
+        (list_tracks, "track"),
+        (list_trackstreaming, "trackstreaming"),
+    ],
 )
 def test_left_aligns_headers_and_values(
     collection: Path,
@@ -184,3 +198,27 @@ def test_help_does_not_require_collection(monkeypatch: pytest.MonkeyPatch, capsy
 
     assert error.value.code == 0
     assert "mediafile table" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("main", "command", "table"),
+    [
+        (list_tracks, "list-tracks", "track"),
+        (list_trackstreaming, "list-trackstreaming", "trackstreaming"),
+    ],
+)
+def test_new_table_help_does_not_require_collection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    main: Callable[[], None],
+    command: str,
+    table: str,
+) -> None:
+    monkeypatch.delenv("MOONGAS_COLLECTION_ROOTDIR", raising=False)
+    monkeypatch.setattr(sys, "argv", [command, "--help"])
+
+    with pytest.raises(SystemExit) as error:
+        main()
+
+    assert error.value.code == 0
+    assert f"{table} table" in capsys.readouterr().out

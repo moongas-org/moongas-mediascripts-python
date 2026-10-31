@@ -1,16 +1,17 @@
 """Shared artist YAML discovery, validation, cleanup, and CLI helpers."""
 
 import argparse
-import re
 import logging
 import os
 from pathlib import Path
+
 from dataclass_wizard.v0.errors import MissingFields
 from mediascan.types.artist.artist_yaml_file import ArtistYamlFile
 from mediascan.types.artist.artist_yaml_file_validator import (
     validate_artist_yaml_content,
 )
-from mediascan.types.media_files.media_files_yaml_file_loader import load_media_files_yaml_file
+from mediascan.utils.db.mediascan_db_loader import load_db
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -21,27 +22,37 @@ def excluded(path: Path) -> bool:
     return any(directory in str(path) for directory in EXCLUDE_DIRS)
 
 
-def add_files_yaml_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--files-yaml-path",
-        default="../../out/files.yml",
-        help="Path to the files YAML file (default: %(default)s)",
-    )
-
-
-def load_artist_paths(files_yaml_path: Path | str) -> dict[str, Path]:
-    files = load_media_files_yaml_file(files_yaml_path)
-    artist_paths: dict[str, Path] = {}
-    for file in files.files:
-        if file.artist not in artist_paths:
-            artist_paths[file.artist] = Path(file.path).parent.parent
-    print(f"loaded {len(artist_paths)} artist paths from mediafiles yaml")
-    return artist_paths
-
-
 def print_artist_yaml_summary(total: int, missing: int, missing_label: str) -> None:
     print(f"Found artist.yml for {total - missing} out of {total} artist folders")
     print(f"{missing_label}: {missing}")
+
+
+def load_artist_paths_from_database(parser: argparse.ArgumentParser) -> dict[str, Path]:
+    collection_root = os.environ.get("MOONGAS_COLLECTION_ROOTDIR")
+    if not collection_root:
+        parser.error("MOONGAS_COLLECTION_ROOTDIR must be set to the active collection directory")
+    database_path = (Path(collection_root) / "mediascan.db").resolve()
+    if not database_path.is_file():
+        parser.error(f"Moongas database file not found: {database_path}")
+
+    database_url = f"sqlite:///{Path(os.path.relpath(database_path)).as_posix()}"
+    engine = load_db(database_url)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(text("SELECT name, path FROM artist ORDER BY name")).mappings()
+            artist_paths: dict[str, Path] = {}
+            for row in rows:
+                artist = row["name"]
+                path = row["path"]
+                if not isinstance(artist, str) or not isinstance(path, str):
+                    raise ValueError(f"Invalid artist record in {database_path}: name and path must be strings")
+                artist_path = Path(path)
+                if not artist_path.is_absolute():
+                    artist_path = Path(collection_root) / artist_path
+                artist_paths[artist] = artist_path
+    finally:
+        engine.dispose()
+    return artist_paths
 
 
 def load_reference_examples(collection_data_path: Path, letters_dirs_to_work: list[str]) -> str:
@@ -156,76 +167,3 @@ def validate_llm_yaml_content(content: str, filename: str) -> None:
         )
     else:
         logger.info("[%s] YAML validation passed", filename)
-
-
-def remove_duplicate_members_lists(content: str) -> str:
-    """Merge duplicate direct ``members`` lists under ``artistData``."""
-    artist_data_match = re.search(r"^(?P<indent>[ \t]*)artistData:[ \t]*$", content, re.MULTILINE)
-    if artist_data_match is None:
-        return content
-
-    artist_data_indent = artist_data_match.group("indent")
-    first_member_match = re.search(
-        rf"^(?P<indent>{re.escape(artist_data_indent)}[ \t]+)members:(?:[ \t]+[^#]*)?[ \t]*$",
-        content[artist_data_match.end() :],
-        re.MULTILINE,
-    )
-    if first_member_match is None:
-        return content
-
-    member_indent = first_member_match.group("indent")
-    member_key = re.compile(rf"^{re.escape(member_indent)}members:(?:[ \t]+[^#]*)?[ \t]*$")
-    lines = content.splitlines(keepends=True)
-    artist_data_line = content[: artist_data_match.start()].count("\n")
-    found_members = False
-    cleaned_lines: list[str] = []
-    line_number = 0
-
-    while line_number < len(lines):
-        line = lines[line_number]
-        if line_number <= artist_data_line or not member_key.match(line):
-            cleaned_lines.append(line)
-            line_number += 1
-            continue
-
-        if not found_members:
-            found_members = True
-            cleaned_lines.append(line)
-            line_number += 1
-            continue
-
-        line_number += 1
-
-    return "".join(cleaned_lines)
-
-
-def remove_duplicate_members_lists_from_collection(collection_data_path: Path) -> int:
-    """Remove duplicate ``members`` lists from every artist YAML under a root."""
-    artist_yaml_paths = sorted(collection_data_path.rglob("artist.yml"))
-    logger.info(
-        "Scanning %d artist YAML file(s) under %s for duplicate members lists",
-        len(artist_yaml_paths),
-        collection_data_path,
-    )
-    cleaned_count = 0
-    for artist_yaml_path in artist_yaml_paths:
-        logger.debug("Checking %s for duplicate members lists", artist_yaml_path)
-        raw_yaml = artist_yaml_path.read_text(encoding="utf-8")
-        normalized_yaml = remove_duplicate_members_lists(raw_yaml)
-        if normalized_yaml == raw_yaml:
-            logger.debug("No duplicate members lists found in %s", artist_yaml_path)
-            continue
-        artist_yaml_path.write_text(normalized_yaml, encoding="utf-8")
-        cleaned_count += 1
-        logger.info(
-            "Merged duplicate members lists and overwrote %s (%d -> %d characters)",
-            artist_yaml_path,
-            len(raw_yaml),
-            len(normalized_yaml),
-        )
-    logger.info(
-        "Completed duplicate members scan: %d modified, %d unchanged",
-        cleaned_count,
-        len(artist_yaml_paths) - cleaned_count,
-    )
-    return cleaned_count

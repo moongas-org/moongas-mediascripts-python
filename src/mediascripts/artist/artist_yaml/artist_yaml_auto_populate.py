@@ -54,8 +54,6 @@ from mediascripts.artist.artist_yaml.artist_yaml_common import (
     clean_backup_files,
     load_input_files,
     load_reference_examples,
-    remove_duplicate_members_lists,
-    remove_duplicate_members_lists_from_collection,
     try_load_artist_yaml_for_skip,
     validate_llm_yaml_content,
 )
@@ -90,9 +88,10 @@ Your job is to read the provided incomplete YAML file and fill in the missing va
 Maintain the exact schema. Return ONLY the valid YAML content. 
 Do not include markdown code blocks (like ```yaml), explanations, or opening/closing text.
 Try to find the dob and dod (date of birth and date of death) fields if they are missing.
-For each member, try to find dob, dod, artistNames, artistRoles, and artistBands.
-Omit dod if the artist is still alive.
-Use "formed" instead of "dob" for bands or artists that are not individuals.
+Use only fields supported by ArtistData: artistNames, city, countryCode,
+regionCode, languageCodes, and optional dob/dod dates. Dates use y and optional
+m/d integer fields. Preserve existing non-empty values and omit facts that cannot
+be established.
 """
 
 
@@ -154,7 +153,7 @@ def process_artist_yaml_file(
         content = response.choices[0].message.content
         if content is None:
             raise ValueError("Model response did not contain YAML content")
-        completed_yaml = remove_duplicate_members_lists(content.strip())
+        completed_yaml = content.strip()
         if not completed_yaml:
             raise ValueError("Model response contained empty YAML content")
         logger.info(
@@ -369,13 +368,8 @@ def main_loop(
     processed_files: set[Path] = set()
     letter_dirs = LETTER_DIRS_NEEDING_WORK
     collection_data_path = Path(MOONGAS_COLLECTION_ROOTDIR) / "data"
-    cleaned_count = remove_duplicate_members_lists_from_collection(collection_data_path)
-    logger.info(
-        "Pre-pass removed duplicate members lists from %d artist YAML file(s)",
-        cleaned_count,
-    )
     if not llm_enabled:
-        logger.info("LLM lookup disabled; exiting after duplicate members pre-pass")
+        logger.info("LLM lookup disabled; exiting without modifying artist YAML files")
         return
     if specific_file:
         specific_file = Path(specific_file)
