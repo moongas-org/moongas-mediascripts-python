@@ -94,7 +94,13 @@ def track(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         '  title: "Track" # inline comment\n'
         "  artist: Artist\n  albumartist: Artist\n  album: Album\n"
         "  genre: Rock\n  year: 1995\n"
-        "trackIdData:\n  - spotifyId: keep-me\ncustomField: keep-this-too\n",
+        "trackIdData:\n"
+        "  streamingData:\n"
+        "    - streamingService: spotify\n"
+        "      trackUrl: https://open.spotify.com/track/keep-me\n"
+        "      trackId: keep-me\n"
+        "      apiData: null\n"
+        "customField: keep-this-too\n",
         encoding="utf-8",
     )
     return path
@@ -122,7 +128,7 @@ def test_accept_either_source_for_each_field(
     assert "# inline comment" in yaml_text
     document = yaml.safe_load(yaml_text)
     assert document["customField"] == "keep-this-too"
-    assert document["trackIdData"] == [{"spotifyId": "keep-me"}]
+    assert document["trackIdData"]["streamingData"][0]["trackId"] == "keep-me"
     if choice in ("y", ""):
         assert track.with_suffix(".yml").read_bytes() == before_yaml
     else:
@@ -170,7 +176,7 @@ def test_custom_value_is_saved_to_both_files(
     document = yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))
     assert document["trackData"][field] == (2020 if field == "year" else custom)
     assert document["customField"] == "keep-this-too"
-    assert document["trackIdData"] == [{"spotifyId": "keep-me"}]
+    assert document["trackIdData"]["streamingData"][0]["trackId"] == "keep-me"
     assert "# inline comment" in track.with_suffix(".yml").read_text(encoding="utf-8")
     assert EasyID3(track)["tracknumber"] == ["1/10"]
     assert compare.compare_track(track, quiet=True)

@@ -1,4 +1,4 @@
-"""Fill AcoustID recordings in track YAML acoustidData with MusicBrainz recording details."""
+"""Fill AcoustID recordings in track YAML mediaFileData with MusicBrainz details."""
 
 import argparse
 import json
@@ -169,15 +169,15 @@ def is_recording_id(value: object) -> bool:
 
 
 def acoustid_recordings(document: dict[str, object], path: Path) -> list[dict[str, object]]:
-    identifiers: object = document.get("trackIdData", [])
-    if identifiers is None:
-        identifiers = []
-    if not is_list(identifiers):
-        raise ValueError("trackIdData must be a list")
+    media_files: object = document.get("mediaFileData", [])
+    if media_files is None:
+        media_files = []
+    if not is_list(media_files):
+        raise ValueError("mediaFileData must be a list")
     recordings: list[dict[str, object]] = []
-    for index, entry in enumerate(identifiers):
+    for index, entry in enumerate(media_files):
         if not is_mapping(entry):
-            raise ValueError("trackIdData entries must be mappings")
+            raise ValueError("mediaFileData entries must be mappings")
         data = entry.get("acoustidData")
         if not data:
             continue
@@ -197,7 +197,7 @@ def acoustid_recordings(document: dict[str, object], path: Path) -> list[dict[st
                     raise ValueError("acoustidData recordings must be mappings")
                 if not is_recording_id(recording.get("id")):
                     logger.warning(
-                        "[%s] trackIdData[%d]: invalid MusicBrainz recording ID %r; skipping",
+                        "[%s] mediaFileData[%d]: invalid MusicBrainz recording ID %r; skipping",
                         path,
                         index,
                         recording.get("id"),
@@ -216,6 +216,7 @@ def run(
     sleep: float = MIN_SLEEP,
     offline: bool = False,
     overwrite: bool = False,
+    reverse: bool = False,
 ) -> bool:
     if not math.isfinite(sleep) or sleep < MIN_SLEEP:
         raise ValueError(f"sleep must be a finite number of seconds >= {MIN_SLEEP:g}")
@@ -231,6 +232,8 @@ def run(
     cache: dict[str, dict[str, object] | None] = {}
     failed: set[str] = set()
     paths = track_files(specific_file, specific_dir)
+    if reverse and count != 0:
+        paths = iter(reversed(list(paths)))
     while count is None or processed < count:
         path = next(paths, None)
         if path is None:
@@ -470,6 +473,11 @@ def main() -> int:
     scope.add_argument("--file", type=Path, help="Process one track YAML file.")
     scope.add_argument("-d", "--dir", type=Path, help="Recursively scan this directory.")
     parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Process track files in the exact reverse of the normal traversal order.",
+    )
+    parser.add_argument(
         "-c",
         "--count",
         type=int,
@@ -520,6 +528,7 @@ def main() -> int:
                 args.sleep,
                 args.offline,
                 args.overwrite,
+                args.reverse,
             )
             else 1
         )

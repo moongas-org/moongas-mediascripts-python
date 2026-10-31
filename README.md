@@ -83,7 +83,7 @@ python -m mediascripts.acoustid.acoustid --help
 `--file` and `--dir` are mutually exclusive. Both `.yml` and `.yaml` files are
 supported; collection metadata files such as `artist.yml`, `album.yml`, and
 `files.yml` are excluded. A track must have a `trackData` mapping and a
-`trackIdData` entry containing `fpcalcData.fingerprint` and a positive numeric
+`mediaFileData` entry containing `fpcalcData.fingerprint` and a positive numeric
 `fpcalcData.duration` in seconds. Missing fingerprints or invalid durations are
 warned about and skipped; this script does not run `fpcalc`.
 
@@ -114,9 +114,9 @@ request URL the script would have sent is printed to stdout, with the API key
 replaced by `[REDACTED]`, and no sleeping, proposals, or file changes occur.
 `--count` and the existing-`acoustidData` skip still apply.
 
-The successful API response is saved as `acoustidData` (the YAML spelling
-of `TrackIdData.acoustid_data`) alongside `fpcalcData` in the matching
-`trackIdData` entry. ISRC lists are written independently, without YAML anchors
+The successful API response is saved as `acoustidData` (the YAML spelling of
+`MediaFileData.acoustid_data`) alongside `fpcalcData` in the matching
+`mediaFileData` entry. ISRC lists are written independently, without YAML anchors
 or aliases. Strings use the YAML writer's normal quoting rules. Only this portion is updated; existing metadata,
 fingerprints, legacy identifier lists, other entries, and YAML comments are
 preserved. `track-yaml-auto-populate` accepts and preserves this response.
@@ -133,6 +133,66 @@ quotes required to preserve string types. Skipped tracks and offline runs are
 not rewritten by this option. Errors are logged and produce a nonzero exit
 status without saving the failed track.
 
+### Spotify track identifiers
+
+Set `SPOTIFY_API_CLIENT_ID` and `SPOTIFY_API_CLIENT_SECRET` to your Spotify
+Developer application credentials, then run:
+
+```bash
+spotify                              # tracks under $MOONGAS_COLLECTION_ROOTDIR/data
+spotify --file "/path/to/01 - Track.yml"
+spotify --dir /path/to/album --count 10 --dry-run
+spotify --dry-run --offline           # preview search URLs; no credentials needed
+spotify --force --overwrite           # re-query populated entries and rewrite unchanged matches
+python -m mediascripts.spotify.spotify --help
+```
+
+Spotify accepts the same mutually exclusive `--file` / `-d, --dir`,
+`-c, --count`, `-n, --dry-run`, `--offline`, `--force`, `--overwrite`, and
+`--sleep` options as AcoustID and MusicBrainz. Directory scans follow library
+symlinks and exclude collection metadata files. The count limits eligible
+track files, not individual ISRC requests.
+
+Each `trackIdData.streamingData[]` entry is searched using its `isrc`,
+followed by distinct ISRCs in
+`mediaFileData[].acoustidData.results[].recordings[].isrcs`. Search values are
+trimmed, uppercased, and stripped of hyphens without changing source ISRCs.
+The first ISRC returning a match wins; if Spotify returns multiple tracks, the
+first result is used. A `streamingData` entry with `streamingService: spotify`,
+`trackId`, `trackUrl`, `apiData: null`, and the source `isrc` is added to the
+scalar `trackIdData` mapping. If ISRCs are available only in `mediaFileData`,
+they are associated with that mapping, which is created if needed.
+Spotify response payloads, track metadata, and source ISRC values are not
+modified. Malformed YAML is reported, not restored from backups, so unrelated
+fields cannot be changed through automatic recovery.
+
+Entries with a complete Spotify streaming record are skipped unless `--force`
+is used. Incomplete records are filled when existing values agree with the
+result; conflicting values are logged and left unchanged unless forced.
+No-match results never erase existing fields. Successful searches, including
+empty results, are cached per ISRC for the run, and failed ISRCs are not
+retried again after exhausting their attempts.
+
+Requests have a 30-second timeout and are spaced at least `--sleep` seconds
+apart (default and minimum: 1.01). This is a conservative interval, not a
+guarantee against Spotify's application-dependent rate limits. HTTP 429
+`Retry-After` delays are honored. HTTP 503 adds 0.5 seconds of temporary extra
+sleep; successful searches reduce it by 0.1 seconds. Expired-token HTTP 401
+responses trigger reauthentication. Network errors, invalid responses, and
+retryable HTTP errors get up to five attempts per ISRC; other 4xx responses
+are not retried. Failures are logged and produce a nonzero exit status while
+other entries and files continue processing.
+
+Requests, statuses, and pretty-printed search responses are logged with bearer
+tokens redacted; authentication bodies and credentials are never logged.
+Changed files are saved atomically with an original-content `.bak` backup and
+a shell-quoted `meld` command. Dry runs still query Spotify but retain proposals
+under `/tmp/spotify-proposal-*`, print `meld` commands, and leave sources and
+backups untouched; remove proposals when finished. Offline dry runs print
+candidate search URLs without authentication, requests, sleeping, or writes.
+`--overwrite` rewrites unchanged successful matches only; it does not bypass
+the populated-entry skip, so combine it with `--force` when needed.
+
 ### MusicBrainz recording details
 
 Run `musicbrainz` after `acoustid` to fill in each AcoustID recording's
@@ -145,11 +205,17 @@ musicbrainz                         # all track YAML files under $MOONGAS_COLLEC
 musicbrainz --file "/path/to/01 - Track.yml" --dry-run
 musicbrainz --dry-run --offline     # print request URLs without contacting MusicBrainz
 musicbrainz --force --overwrite     # rewrite even when recording details are unchanged
+musicbrainz --reverse --count 10    # start with the last eligible tracks in normal traversal order
 ```
 
 It accepts the same `--file`, `--dir`, `-c/--count`, `-n/--dry-run`,
-`--offline`, `--force`, `--overwrite`, and `--sleep` options as `acoustid`. No API key is
-needed. Each recording ID under `trackIdData[].acoustidData.results[].recordings[]`
+`--offline`, `--force`, `--overwrite`, and `--sleep` options as `acoustid`.
+Additionally, `--reverse` processes files in the exact reverse of the normal
+collection or `--dir` traversal order, with `--count` applied in that reversed
+order. It collects the discovered paths before processing; the default traversal
+is unchanged. Recording order within each file is unchanged, and `--file` still
+processes just that file. No API key is needed.
+Each recording ID under `mediaFileData[].acoustidData.results[].recordings[]`
 whose `isrcs` is missing or empty is requested from
 `https://musicbrainz.org/ws/2/recording/<id>?inc=isrcs&fmt=json`. Recordings
 with no ISRCs in MusicBrainz therefore keep an empty list and are checked again
@@ -299,12 +365,13 @@ missing sidecars are not created.
 
 Uses the mediascan `TrackYamlFile` schema: `trackData` contains `title`, `artist`,
 `albumartist`, `album`, `genre`, and integer `year`; optional `trackIdData` is a
-**list** of identifier mappings supporting ISRC, Spotify, Apple Music, YouTube
-Music/video, Amazon Music, Tidal, and Deezer. Tracks with valid core metadata and
-at least one non-empty identifier or URL are skipped unless `--force` is used.
-Nested `fpcalcData` (audio duration and fingerprint) is accepted and preserved,
-but does not by itself count as a streaming identifier. The LLM cannot add or
-change audio fingerprint data.
+**mapping** containing a `streamingData` list. Each streaming entry has
+`streamingService`, `trackUrl`, `trackId`, `apiData`, and optional `isrc`.
+Optional `mediaFileData` contains local-file metadata, `fpcalcData` fingerprints,
+and `acoustidData` results. Tracks with valid core metadata and at least one
+non-empty streaming track ID or URL are skipped unless `--force` is used.
+The LLM must preserve `mediaFileData` exactly; it cannot add or change audio
+fingerprints, local-file metadata, or AcoustID data.
 Up to three complete files in the selected scope serve as reference examples.
 Pending tracks are shuffled and processed once per run, with 30 seconds between
 requests by default. `--llm=false` only checks files, without creating a client
@@ -342,7 +409,7 @@ returned by the model are converted to strings, preserving their original digits
 (including leading zeros); other invalid identifier types are rejected with the
 field path and offending value. Before saving, changed fields
 are displayed with their `Track YAML` and `LLM Result` values, including indexed
-identifier fields such as `trackIdData[0].spotifyId`. A unified file-content diff
+identifier fields such as `trackIdData.streamingData[0].trackId`. A unified file-content diff
 also shows the original/proposed filenames, context lines, and `-`/`+` YAML
 lines, including during dry-run. This is informational;
 no interactive confirmation is required. Changed files get a sibling

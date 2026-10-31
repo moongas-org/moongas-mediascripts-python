@@ -12,7 +12,14 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 from mediascripts.track.track_yaml import track_yaml_auto_populate as populate
 
 CORE = "trackData:\n  title: Track\n  artist: Artist\n  albumartist: Artist\n  album: Album\n  genre: Rock\n  year: 1995\n"
-COMPLETE = CORE + "trackIdData:\n  - isrc: USABC9500001\n    spotifyId: example-track\n"
+STREAMING_ENTRY = (
+    "streamingService: spotify\n"
+    "        trackUrl: https://open.spotify.com/track/example-track\n"
+    "        trackId: example-track\n"
+    "        apiData: null\n"
+    "        isrc: USABC9500001\n"
+)
+COMPLETE = CORE + "trackIdData:\n  streamingData:\n      - " + STREAMING_ENTRY
 
 
 @pytest.fixture(autouse=True)
@@ -36,12 +43,14 @@ def track(tmp_path: Path) -> Path:
 
 @pytest.mark.parametrize("field", sorted(populate.ID_FIELDS))
 def test_all_track_identifier_fields_round_trip(field: str) -> None:
-    document = populate.validate_track_yaml_content(CORE + f"trackIdData:\n  - {field}: example\n")
+    document = populate.validate_track_yaml_content(
+        CORE + f"trackIdData:\n  {field}:\n      - " + STREAMING_ENTRY
+    )
     assert populate.has_identifiers(document)
 
 
 FINGERPRINT_IDS = (
-    "trackIdData:\n"
+    "mediaFileData:\n"
     "  - fpcalcData:\n"
     "      duration: 123.5\n"
     "      fingerprint: AQAA-example-fingerprint\n"
@@ -51,20 +60,24 @@ FINGERPRINT_IDS = (
 def test_fingerprint_data_round_trips_but_is_not_a_streaming_identifier() -> None:
     document = populate.validate_track_yaml_content(CORE + FINGERPRINT_IDS)
     assert not populate.has_identifiers(document)
-    assert document["trackIdData"] == [
+    assert document["mediaFileData"] == [
         {"fpcalcData": {"duration": 123.5, "fingerprint": "AQAA-example-fingerprint"}}
     ]
 
 
-def test_acoustid_identifier_lists_are_valid_and_count_as_identifiers() -> None:
-    content = CORE + FINGERPRINT_IDS + "    acoustidIds: [match-1]\n    musicbrainzRecordingIds: [recording-1]\n"
+def test_acoustid_data_is_kept_on_media_file_and_is_not_a_streaming_identifier() -> None:
+    content = CORE + FINGERPRINT_IDS + (
+        "    acoustidData:\n"
+        "      status: ok\n"
+        "      results: [{id: match-1, score: 0.9, recordings: [{id: recording-1}]}]\n"
+    )
     document = populate.validate_track_yaml_content(content)
-    assert populate.has_identifiers(document)
+    assert not populate.has_identifiers(document)
 
 
 def test_full_acoustid_response_is_accepted_and_preserved() -> None:
     content = (
-        CORE + FINGERPRINT_IDS
+        CORE + "mediaFileData:\n  - fpcalcData: {duration: 123.5, fingerprint: AQAA-example-fingerprint}\n"
         + "    acoustidData:\n"
         + "      status: ok\n"
         + "      results:\n"
@@ -73,7 +86,7 @@ def test_full_acoustid_response_is_accepted_and_preserved() -> None:
         + "          recordings: [{id: recording-1, title: Track, length: 203000, isrcs: [USSM18500120]}]\n"
     )
     document = populate.validate_track_yaml_content(content)
-    completed = populate.validate_track_yaml_content(content + "    spotifyId: example\n")
+    completed = populate.validate_track_yaml_content(content + COMPLETE.removeprefix(CORE))
     populate.preserve_existing_values(document, completed)
     assert "acoustidData" not in populate.ID_FIELDS
     modified = populate.validate_track_yaml_content(content.replace("score: 0.9", "score: 0.1"))
@@ -81,30 +94,59 @@ def test_full_acoustid_response_is_accepted_and_preserved() -> None:
         populate.preserve_existing_values(document, modified)
 
 
-@pytest.mark.parametrize("value", ["null", "123", "match-1", "[123]", "['']"])
-def test_acoustid_identifier_lists_reject_invalid_values(value: str) -> None:
-    with pytest.raises(ValueError, match="acoustidIds"):
-        populate.validate_track_yaml_content(CORE + f"trackIdData:\n  - acoustidIds: {value}\n")
-
-
-def test_existing_fingerprint_is_preserved_when_adding_service_id(track: Path) -> None:
+def test_existing_media_file_data_is_preserved_when_adding_service_id(track: Path) -> None:
     original = CORE + FINGERPRINT_IDS
     track.write_text(original)
-    response = original + "    deezerId: '12345'\n"
+    response = original + COMPLETE.removeprefix(CORE)
     assert populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(response)))
     loaded = load_track_yaml_file(track)
-    assert loaded.track_id_data is not None
-    fingerprint = loaded.track_id_data[0].fpcalc_data
+    assert loaded.media_file_data is not None
+    fingerprint = loaded.media_file_data[0].fpcalc_data
     assert fingerprint is not None
     assert fingerprint.duration == 123.5
     assert fingerprint.fingerprint == "AQAA-example-fingerprint"
     assert track.with_name(track.name + ".bak").read_text() == original
 
 
+def test_streaming_data_can_be_added_without_changing_existing_stream_entries(track: Path) -> None:
+    original = CORE + (
+        "trackIdData:\n"
+        "  streamingData:\n"
+        "      - streamingService: apple-music\n"
+        "        trackUrl: https://music.apple.com/track/example\n"
+        "        trackId: apple-example\n"
+        "        apiData: null\n"
+        "        isrc: USABC9500001\n"
+    )
+    completed = original + (
+        "      - streamingService: spotify\n"
+        "        trackUrl: https://open.spotify.com/track/example-track\n"
+        "        trackId: example-track\n"
+        "        apiData: null\n"
+        "        isrc: USABC9500001\n"
+    )
+    track.write_text(original)
+    assert populate.process_track_yaml_file(
+        track, "", 1, 1, client=cast(OpenAI, make_client(completed))
+    )
+    loaded = load_track_yaml_file(track)
+    assert loaded.track_id_data is not None
+    data = loaded.track_id_data.streaming_data
+    assert data is not None
+    assert [(item.streaming_service, item.track_id) for item in data] == [
+        ("apple-music", "apple-example"),
+        ("spotify", "example-track"),
+    ]
+
+
 @pytest.mark.parametrize("original", [CORE, CORE + FINGERPRINT_IDS])
 def test_model_cannot_add_or_change_fingerprint(track: Path, original: str) -> None:
     track.write_text(original)
-    response = (CORE + FINGERPRINT_IDS).replace("AQAA-example-fingerprint", "invented")
+    response = (
+        (CORE + FINGERPRINT_IDS).replace("AQAA-example-fingerprint", "invented")
+        if "fingerprint" in original
+        else original + FINGERPRINT_IDS
+    )
     assert not populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(response)))
     assert track.read_text() == original
     assert not track.with_name(track.name + ".bak").exists()
@@ -116,11 +158,11 @@ def test_model_cannot_add_or_change_fingerprint(track: Path, original: str) -> N
 ])
 def test_invalid_fingerprint_shape_is_rejected(value: str) -> None:
     with pytest.raises(ValueError, match="fpcalcData"):
-        populate.validate_track_yaml_content(CORE + f"trackIdData:\n  - fpcalcData: {value}\n")
+        populate.validate_track_yaml_content(CORE + f"mediaFileData:\n  - fpcalcData: {value}\n")
 
 
 @pytest.mark.parametrize(
-    "identifiers", ["", "trackIdData: null\n", "trackIdData: []\n", "trackIdData:\n  - spotifyId: null\n    isrc: '  '\n"]
+    "identifiers", ["", "trackIdData: null\n", "trackIdData: {}\n", "trackIdData:\n  streamingData: []\n"]
 )
 def test_missing_identifiers_are_not_complete(identifiers: str) -> None:
     assert not populate.has_identifiers(populate.validate_track_yaml_content(CORE + identifiers))
@@ -135,9 +177,10 @@ def test_missing_identifiers_are_not_complete(identifiers: str) -> None:
         "```yaml\n" + COMPLETE + "```",
         "trackData: [\n",
         CORE + "trackIdData:\n  isrc: example\n",
-        CORE + "trackIdData:\n  - unknownId: example\n",
-        CORE + "trackIdData:\n  - spotifyUrl: 123\n",
-        CORE + "trackIdData:\n  - example\n",
+        CORE + "trackIdData: {unknownId: example}\n",
+        CORE + "trackIdData:\n  streamingData: [{streamingService: spotify, trackId: id}]\n",
+        CORE + "mediaFileData: [{unknownField: value}]\n",
+        CORE + "trackIdData: []\n",
         CORE + "format: mp3\n",
         CORE.replace("year: 1995", "year: true"),
         CORE.replace("year: 1995", "year: '1995'"),
@@ -163,24 +206,31 @@ def test_changed_response_is_validated_backed_up_and_saved_atomically(track: Pat
     assert track.stat().st_mode & 0o777 == 0o640
     loaded = load_track_yaml_file(track)
     assert loaded.track_id_data is not None
-    assert loaded.track_id_data[0].spotify_id == "example-track"
+    streaming = loaded.track_id_data.streaming_data
+    assert streaming is not None
+    assert streaming[0].track_id == "example-track"
     messages = client.chat.completions.create.call_args.kwargs["messages"]
     assert COMPLETE in messages[1]["content"]
     assert str(track) in messages[1]["content"]
     assert not list(track.parent.glob(".*.tmp"))
 
 
-@pytest.mark.parametrize("field", ["appleMusicId", "deezerId", "tidalId", "spotifyId"])
 @pytest.mark.parametrize("digits", ["123456789", "00123456789"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_model_numeric_service_ids_are_quoted_without_losing_digits(
     track: Path,
     capsys: pytest.CaptureFixture[str],
-    field: str,
     digits: str,
     dry_run: bool,
 ) -> None:
-    response = CORE + f"trackIdData:\n  - {field}: {digits}\n"
+    response = CORE + (
+        "trackIdData:\n"
+        "  streamingData:\n"
+        "      - streamingService: spotify\n"
+        "        trackUrl: https://open.spotify.com/track/example\n"
+        f"        trackId: {digits}\n"
+        "        apiData: null\n"
+    )
     assert populate.process_track_yaml_file(
         track,
         "",
@@ -195,7 +245,7 @@ def test_model_numeric_service_ids_are_quoted_without_losing_digits(
         assert not track.with_name(track.name + ".bak").exists()
     else:
         document = populate.validate_track_yaml_content(track.read_text())
-        assert document["trackIdData"] == [{field: digits}]
+        assert document["trackIdData"]["streamingData"][0]["trackId"] == digits
         assert track.with_name(track.name + ".bak").read_text() == CORE
 
 
@@ -205,7 +255,14 @@ def test_invalid_identifier_types_are_reported_precisely(
     caplog: pytest.LogCaptureFixture,
     value: str,
 ) -> None:
-    response = CORE + f"trackIdData:\n  - deezerId: {value}\n"
+    response = CORE + (
+        "trackIdData:\n"
+        "  streamingData:\n"
+        "      - streamingService: deezer\n"
+        "        trackUrl: https://example.test/track\n"
+        f"        trackId: {value}\n"
+        "        apiData: null\n"
+    )
     assert not populate.process_track_yaml_file(
         track,
         "",
@@ -214,7 +271,7 @@ def test_invalid_identifier_types_are_reported_precisely(
         client=cast(OpenAI, make_client(response)),
         dry_run=True,
     )
-    assert "trackIdData[0].deezerId must be a string or null; got" in caplog.text
+    assert "trackIdData.streamingData[0].trackId must be a non-empty string" in caplog.text
     assert track.read_text() == CORE
 
 
@@ -265,8 +322,8 @@ def test_diff_shows_added_identifiers_before_source_is_replaced(
     def check_diff_then_replace(source: Path, destination: Path) -> None:
         output = capsys.readouterr().out
         assert str(track) in output
-        assert "trackIdData[0].isrc: Track YAML = (missing); LLM Result = 'USABC9500001'" in output
-        assert "trackIdData[0].spotifyId: Track YAML = (missing); LLM Result = 'example-track'" in output
+        assert "trackIdData.streamingData[0].streamingService:" in output
+        assert "trackIdData.streamingData[0].trackId:" in output
         assert "trackData.title:" not in output
         assert track.read_text() == CORE
         replace(source, destination)
@@ -275,18 +332,22 @@ def test_diff_shows_added_identifiers_before_source_is_replaced(
     assert populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(COMPLETE)))
 
 
-def test_diff_shows_filled_core_fields_and_multiple_identifier_entries(
+def test_diff_shows_filled_core_fields_and_multiple_streaming_entries(
     track: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    original = CORE.replace("title: Track", "title: null") + "trackIdData:\n  - isrc: USABC9500001\n"
-    completed = COMPLETE + "  - deezerId: other-recording\n"
+    original = CORE.replace("title: Track", "title: null")
+    completed = COMPLETE + (
+        "      - streamingService: deezer\n"
+        "        trackUrl: https://example.test/other\n"
+        "        trackId: other-recording\n"
+        "        apiData: null\n"
+    )
     track.write_text(original)
     assert populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(completed)))
     output = capsys.readouterr().out
     assert "trackData.title: Track YAML = None; LLM Result = 'Track'" in output
-    assert "trackIdData[1].deezerId: Track YAML = (missing); LLM Result = 'other-recording'" in output
-    assert "trackIdData[0].isrc:" not in output
+    assert "trackIdData.streamingData[1].trackId: Track YAML = (missing); LLM Result = 'other-recording'" in output
 
 
 def test_no_diff_for_unchanged_response(track: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -336,7 +397,7 @@ def test_unified_file_diff_shows_proposed_yaml(
     )
     output = capsys.readouterr().out
     assert f"--- {track}\n+++ {track} (proposed)\n@@ " in output
-    assert "+trackIdData:\n+  - isrc: USABC9500001\n+    spotifyId: example-track\n" in output
+    assert "+trackIdData:\n+  streamingData:\n+      - streamingService: spotify\n" in output
     if empty:
         assert "+trackData:\n" in output
     else:
@@ -371,7 +432,7 @@ def test_existing_identifiers_cannot_be_changed(track: Path) -> None:
 @pytest.mark.parametrize("value", ["", " ", None])
 def test_blank_metadata_can_be_filled(value: str | None) -> None:
     populate.preserve_existing_values({"trackData": {"title": value}}, {"trackData": {"title": "Track"}})
-    populate.preserve_existing_values({"trackIdData": []}, {})
+    populate.preserve_existing_values({"trackIdData": None}, {})
 
 
 @pytest.mark.parametrize("status", [410, 429, 500, None])
@@ -557,7 +618,7 @@ def test_cli_dry_run_requests_updates_and_shows_diff_without_writing(
     assert "[dry-run] Diff shown" in caplog.text
     output = capsys.readouterr().out
     assert str(track) in output
-    assert "trackIdData[0].spotifyId: Track YAML = (missing); LLM Result = 'example-track'" in output
+    assert "trackIdData.streamingData[0].trackId: Track YAML = (missing); LLM Result = 'example-track'" in output
     if scope == "--dir":
         assert ("Skipping already-complete" in caplog.text) is not force
     assert {path: path.read_bytes() for path in track.parent.iterdir()} == before

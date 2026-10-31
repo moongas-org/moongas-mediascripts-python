@@ -1,4 +1,4 @@
-"""Look up track YAML fingerprints and save full AcoustID responses in acoustidData."""
+"""Look up track YAML media-file fingerprints and save full AcoustID responses."""
 
 import argparse
 import json
@@ -161,15 +161,15 @@ def validate_response(result: Mapping[str, object]) -> None:
 def fingerprint_entries(
     document: dict[str, object], path: Path, api_key: str
 ) -> list[tuple[dict[str, object], int, str]]:
-    identifiers: object = document.get("trackIdData", [])
-    if identifiers is None:
-        identifiers = []
-    if not is_list(identifiers):
-        raise ValueError("trackIdData must be a list")
+    media_files: object = document.get("mediaFileData", [])
+    if media_files is None:
+        media_files = []
+    if not is_list(media_files):
+        raise ValueError("mediaFileData must be a list")
     entries: list[tuple[dict[str, object], int, str]] = []
-    for index, entry in enumerate(identifiers):
+    for index, entry in enumerate(media_files):
         if not is_mapping(entry):
-            raise ValueError("trackIdData entries must be mappings")
+            raise ValueError("mediaFileData entries must be mappings")
         data = entry.get("fpcalcData")
         if data is None:
             continue
@@ -180,7 +180,7 @@ def fingerprint_entries(
             log(
                 logging.WARNING,
                 api_key,
-                "[%s] trackIdData[%d]: missing fpcalc fingerprint; skipping",
+                "[%s] mediaFileData[%d]: missing fpcalc fingerprint; skipping",
                 path,
                 index,
             )
@@ -195,7 +195,7 @@ def fingerprint_entries(
             log(
                 logging.WARNING,
                 api_key,
-                "[%s] trackIdData[%d]: invalid fpcalc duration; skipping",
+                "[%s] mediaFileData[%d]: invalid fpcalc duration; skipping",
                 path,
                 index,
             )

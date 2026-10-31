@@ -13,9 +13,10 @@ from io import StringIO
 from pathlib import Path
 from typing import Protocol, TypeGuard, cast
 
+from mediascan.types.media_file.media_file_data import MediaFileData
+from mediascan.types.track.streaming.streaming_data import StreamingData
 from mediascan.types.track.track_data import TrackData
 from mediascan.types.track.track_id_data import TrackIdData
-from mediascan.types.track.track_fpcalc_data import TrackFpCalcData
 from mediascan.types.track.track_yaml_file import TrackYamlFile
 from mediascan.types.album.album_path import AlbumPathBuilder
 from openai import APIError, APIStatusError, OpenAI
@@ -42,30 +43,27 @@ def camel_case(name: str) -> str:
 
 
 CORE_FIELDS = {field.name for field in fields(TrackData)}
-ID_FIELDS = {camel_case(field.name) for field in fields(TrackIdData)} - {"fpcalcData", "acoustidData"}
-ID_LIST_FIELDS = {"acoustidIds", "musicbrainzRecordingIds"}
-FPCALC_FIELDS = {camel_case(field.name) for field in fields(TrackFpCalcData)}
+ID_FIELDS = {camel_case(field.name) for field in fields(TrackIdData)}
+STREAMING_FIELDS = {camel_case(field.name) for field in fields(StreamingData)}
+MEDIA_FILE_FIELDS = {camel_case(field.name) for field in fields(MediaFileData)}
+FPCALC_FIELDS = {"duration", "fingerprint"}
 YAML_ERRORS = (OSError, UnicodeError, YAMLError, ValueError, TypeError)
 
 SYSTEM_PROMPT = f"""You are an automated track metadata-filling assistant.
 Return ONLY valid YAML, without markdown fences, explanations, or comments.
-Use the TrackYamlFile schema: a trackData mapping and an optional trackIdData list.
+Use the TrackYamlFile schema: a trackData mapping and an optional trackIdData mapping.
 trackData contains title, artist, albumartist, album, genre (strings), and year (integer).
-Each trackIdData list item may contain only these optional string fields:
-{", ".join(sorted(ID_FIELDS))}.
-Quote every identifier and URL, including numeric service IDs (e.g. deezerId: "123456").
+The trackIdData mapping may contain an optional streamingData list. Each streamingData
+entry must have streamingService, trackUrl, trackId, apiData, and optional isrc.
+Use streamingService values such as spotify, apple-music, deezer, and tidal.
+Quote every identifier and URL, including numeric service IDs (e.g. trackId: "123456").
 Fill missing core metadata and find ISRC and streaming identifiers/URLs for the exact
 recording, artist, album, and version, not another recording with a similar title.
 Preserve all existing non-empty metadata and identifiers. Never invent identifiers,
 URLs, or facts. Omit fields you cannot establish; do not use placeholder strings.
-trackIdData must be a list of mappings, never a single mapping.
-An entry may also contain fpcalcData with duration (number) and fingerprint (string).
-Preserve existing fpcalcData exactly; never invent or infer audio fingerprints or durations.
-An entry may contain acoustidData holding the entire AcoustID API response.
-Preserve acoustidData exactly; never invent or modify API response data.
-Preserve existing acoustidIds and musicbrainzRecordingIds string lists exactly.
-Do not invent or add AcoustID matches or MusicBrainz recording identifiers.
-Do not add media-file-specific fields such as format or bitrate.
+trackIdData must be a mapping, never a list.
+The optional mediaFileData list contains local-file metadata, fingerprints, and AcoustID data.
+Preserve mediaFileData exactly; never invent, remove, or modify its entries.
 """
 
 
@@ -95,35 +93,36 @@ def normalize_model_identifiers(content: str) -> str:
     """Quote decimal service IDs without losing their original digits."""
     document = load_document(content)
     identifiers = document.get("trackIdData")
-    if not is_list(identifiers):
+    if not is_mapping(identifiers):
         return content
     lexical = cast(_YamlLoader, YAML(typ="base")).load(content)
-    if not is_mapping(lexical) or not is_list(lexical.get("trackIdData")):
+    if not is_mapping(lexical) or not is_mapping(lexical.get("trackIdData")):
         return content
-    lexical_entries = cast(list[object], lexical["trackIdData"])
+    lexical_entry = cast(dict[str, object], lexical["trackIdData"])
     changed = False
-    for index, entry in enumerate(identifiers):
-        raw_entry = lexical_entries[index]
-        if not is_mapping(entry) or not is_mapping(raw_entry):
+    streaming = identifiers.get("streamingData")
+    raw_streaming = lexical_entry.get("streamingData")
+    if not is_list(streaming) or not is_list(raw_streaming):
+        return content
+    for streaming_index, item in enumerate(streaming):
+        raw_item = raw_streaming[streaming_index]
+        if not is_mapping(item) or not is_mapping(raw_item):
             continue
-        for key, value in entry.items():
-            raw_value = raw_entry.get(key)
-            if (
-                key in ID_FIELDS
-                and key.endswith("Id")
-                and type(value) is int
-                and isinstance(raw_value, str)
-                and raw_value.isascii()
-                and raw_value.isdecimal()
-            ):
-                entry[key] = raw_value
-                changed = True
-                logger.warning(
-                    "Quoting numeric model identifier trackIdData[%d].%s: %r",
-                    index,
-                    key,
-                    raw_value,
-                )
+        value = item.get("trackId")
+        raw_value = raw_item.get("trackId")
+        if (
+            type(value) is int
+            and isinstance(raw_value, str)
+            and raw_value.isascii()
+            and raw_value.isdecimal()
+        ):
+            item["trackId"] = raw_value
+            changed = True
+            logger.warning(
+                "Quoting numeric model identifier trackIdData.streamingData[%d].trackId: %r",
+                streaming_index,
+                raw_value,
+            )
     if not changed:
         return content
     stream = StringIO()
@@ -134,7 +133,7 @@ def normalize_model_identifiers(content: str) -> str:
 def validate_track_yaml_content(content: str) -> dict[str, object]:
     """Enforce the camelCase mediascan schema before saving or skipping."""
     document = load_document(content)
-    if document.keys() - {"trackData", "trackIdData"}:
+    if document.keys() - {"trackData", "trackIdData", "mediaFileData"}:
         raise ValueError("Unexpected track YAML fields")
     core = document.get("trackData")
     if not is_mapping(core) or core.keys() != CORE_FIELDS:
@@ -147,37 +146,54 @@ def validate_track_yaml_content(content: str) -> dict[str, object]:
             raise ValueError(f"trackData.{key} must be a non-empty string")
     identifiers = document.get("trackIdData")
     if identifiers is not None:
-        if not is_list(identifiers):
-            raise ValueError("trackIdData must be a list")
-        for index, entry in enumerate(identifiers):
-            if not is_mapping(entry) or entry.keys() - (ID_FIELDS | ID_LIST_FIELDS | {"fpcalcData", "acoustidData"}):
-                raise ValueError(
-                    "trackIdData entries must contain only supported identifier fields"
-                )
-            for key, value in entry.items():
-                if key == "acoustidData":
-                    if value is not None and not is_mapping(value):
-                        raise ValueError(f"trackIdData[{index}].acoustidData must be a mapping or null")
-                    continue
-                if key in ID_LIST_FIELDS:
-                    if not is_list(value) or any(not isinstance(item, str) or not item.strip() for item in value):
-                        raise ValueError(f"trackIdData[{index}].{key} must be a list of non-empty strings")
-                    continue
+        if not is_mapping(identifiers) or identifiers.keys() - ID_FIELDS:
+            raise ValueError("trackIdData must contain only supported identifier fields")
+        streaming_data = identifiers.get("streamingData")
+        if streaming_data is not None:
+            if not is_list(streaming_data):
+                raise ValueError("trackIdData.streamingData must be a list")
+            for streaming_index, streaming in enumerate(streaming_data):
+                field_path = f"trackIdData.streamingData[{streaming_index}]"
+                if not is_mapping(streaming) or streaming.keys() - STREAMING_FIELDS:
+                    raise ValueError(f"{field_path} must contain only supported streaming fields")
+                for required in ("streamingService", "trackUrl", "trackId"):
+                    value = streaming.get(required)
+                    if not isinstance(value, str) or not value.strip():
+                        raise ValueError(f"{field_path}.{required} must be a non-empty string")
+                if "apiData" not in streaming:
+                    raise ValueError(f"{field_path}.apiData is required")
+                isrc = streaming.get("isrc")
+                if isrc is not None and not isinstance(isrc, str):
+                    raise ValueError(f"{field_path}.isrc must be a string or null")
+    media_files = document.get("mediaFileData")
+    if media_files is not None:
+        if not is_list(media_files):
+            raise ValueError("mediaFileData must be a list")
+        for index, media_file in enumerate(media_files):
+            field_path = f"mediaFileData[{index}]"
+            if not is_mapping(media_file) or media_file.keys() - MEDIA_FILE_FIELDS:
+                raise ValueError(f"{field_path} must contain only supported media-file fields")
+            for key, value in media_file.items():
+                value_path = f"{field_path}.{key}"
                 if key == "fpcalcData":
                     if value is not None:
                         if not is_mapping(value) or value.keys() - FPCALC_FIELDS:
-                            raise ValueError(f"trackIdData[{index}].fpcalcData must be a fingerprint mapping or null")
+                            raise ValueError(f"{value_path} must be a fingerprint mapping or null")
                         duration = value.get("duration")
                         fingerprint = value.get("fingerprint")
                         if duration is not None and type(duration) not in (int, float):
-                            raise ValueError(f"trackIdData[{index}].fpcalcData.duration must be a number or null")
+                            raise ValueError(f"{value_path}.duration must be a number or null")
                         if fingerprint is not None and not isinstance(fingerprint, str):
-                            raise ValueError(f"trackIdData[{index}].fpcalcData.fingerprint must be a string or null")
+                            raise ValueError(f"{value_path}.fingerprint must be a string or null")
                     continue
-                if value is not None and not isinstance(value, str):
-                    raise ValueError(
-                        f"trackIdData[{index}].{key} must be a string or null; got {type(value).__name__}: {value!r}"
-                    )
+                if key == "acoustidData":
+                    if value is not None and not is_mapping(value):
+                        raise ValueError(f"{value_path} must be a mapping or null")
+                    continue
+                expected_type = int if key in {"size", "year", "duration"} else str
+                if value is not None and (not isinstance(value, expected_type) or
+                                          (expected_type is int and isinstance(value, bool))):
+                    raise ValueError(f"{value_path} must be a {expected_type.__name__} or null")
     loaded: object = getattr(TrackYamlFile, "from_yaml")(content)
     if not isinstance(loaded, TrackYamlFile):
         raise ValueError("Expected a TrackYamlFile")
@@ -186,15 +202,19 @@ def validate_track_yaml_content(content: str) -> dict[str, object]:
 
 def has_identifiers(document: Mapping[str, object]) -> bool:
     identifiers = document.get("trackIdData")
-    return is_list(identifiers) and any(
-        is_mapping(entry)
-        and any(
-            (key in ID_FIELDS and isinstance(value, str) and bool(value.strip()))
-            or (key in ID_LIST_FIELDS and is_list(value) and bool(value))
-            for key, value in entry.items()
-        )
-        for entry in identifiers
-    )
+    if not is_mapping(identifiers):
+        return False
+    streaming_data = identifiers.get("streamingData")
+    if not is_list(streaming_data):
+        return False
+    for streaming in streaming_data:
+        if not is_mapping(streaming):
+            continue
+        for key in ("trackId", "trackUrl"):
+            value = streaming.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+    return False
 
 
 def preserve_existing_values(original: object, completed: object) -> None:
@@ -209,17 +229,20 @@ def preserve_existing_values(original: object, completed: object) -> None:
             raise ValueError("Model removed existing identifiers")
         for entry in original:
             if is_mapping(entry):
-                known = {
-                    key: value
-                    for key, value in entry.items()
-                    if value not in (None, "")
-                }
-                if not any(
-                    is_mapping(candidate)
-                    and all(candidate.get(key) == value for key, value in known.items())
-                    for candidate in completed
-                ):
+                preserved = False
+                for candidate in completed:
+                    if not is_mapping(candidate):
+                        continue
+                    try:
+                        preserve_existing_values(entry, candidate)
+                    except ValueError:
+                        continue
+                    preserved = True
+                    break
+                if not preserved:
                     raise ValueError("Model changed existing track identifiers")
+            elif entry not in completed:
+                raise ValueError("Model changed existing track identifiers")
     elif (
         original not in (None, "", [])
         and not (isinstance(original, str) and not original.strip())
@@ -308,17 +331,8 @@ def process_track_yaml_file(
         )
         completed = validate_track_yaml_content(completed_yaml)
         preserve_existing_values(original, completed)
-        original_ids = original.get("trackIdData")
-        completed_ids = completed.get("trackIdData")
-        original_fingerprints = [
-            entry.get("fpcalcData") for entry in original_ids
-            if is_mapping(entry) and entry.get("fpcalcData") is not None
-        ] if is_list(original_ids) else []
-        if is_list(completed_ids):
-            for entry in completed_ids:
-                if is_mapping(entry) and entry.get("fpcalcData") is not None:
-                    if entry["fpcalcData"] not in original_fingerprints:
-                        raise ValueError("Model added or changed audio fingerprint data")
+        if original.get("mediaFileData") != completed.get("mediaFileData"):
+            raise ValueError("Model added, removed, or changed mediaFileData")
         if completed_yaml == raw_yaml.strip():
             logger.info(
                 "[%s] Model result unchanged; leaving file untouched", input_path

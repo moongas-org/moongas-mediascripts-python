@@ -50,7 +50,7 @@ def test_invalid_id_still_allows_isrc_format_repair(track: Path, http_mock: Magi
 def test_populated_unquoted_isrcs_are_left_unchanged(track: Path, http_mock: MagicMock) -> None:
     yaml = YAML()
     data = yaml.load(track.read_text())
-    for result in data["trackIdData"][0]["acoustidData"]["results"]:
+    for result in data["mediaFileData"][0]["acoustidData"]["results"]:
         for recording in result["recordings"]:
             recording["isrcs"] = ["USSM18500120"]
     with track.open("w") as output:
@@ -65,8 +65,8 @@ def test_populated_unquoted_isrcs_are_left_unchanged(track: Path, http_mock: Mag
 CORE = "# preserve me\ntrackData:\n  title: Track\n  artist: Artist\n  albumartist: Artist\n  album: Album\n  genre: Rock\n  year: 1995\n"
 TRACK = (
     CORE
-    + "trackIdData:\n"
-    + "  - spotifyId: existing\n"
+    + "mediaFileData:\n"
+    + "  - path: /music/existing.flac\n"
     + "    fpcalcData: {duration: 252, fingerprint: AQADtE-example}\n"
     + "    acoustidData:\n"
     + "      status: ok\n"
@@ -132,7 +132,7 @@ def respond(request: Request, timeout: float) -> HttpResponse:
 
 
 def recordings(path: Path) -> list[dict[str, object]]:
-    data = YAML(typ="safe").load(path.read_text())["trackIdData"][0]["acoustidData"]
+    data = YAML(typ="safe").load(path.read_text())["mediaFileData"][0]["acoustidData"]
     return [recording for result in data["results"] for recording in result["recordings"]]
 
 
@@ -183,7 +183,7 @@ def test_lookup_fills_recordings_and_dedupes_requests(
     assert text.count("- GBARL9200074") == 2
     assert text.count("- USBM10255392") == 2
     assert text.startswith("# preserve me\n")
-    assert "spotifyId: existing" in text and "fingerprint: AQADtE-example" in text
+    assert "path: /music/existing.flac" in text and "fingerprint: AQADtE-example" in text
     backup = track.with_name(track.name + ".bak")
     assert backup.read_text() == TRACK
     assert capsys.readouterr().out.strip() == shlex.join(["meld", str(backup.resolve()), str(track.resolve())])
@@ -197,8 +197,8 @@ def test_saved_result_loads_with_mediascan_schema(track: Path, http_mock: MagicM
 
     assert musicbrainz.run(specific_file=track)
     loaded = load_track_yaml_file(track)
-    assert loaded.track_id_data is not None
-    data = loaded.track_id_data[0].acoustid_data
+    assert loaded.media_file_data is not None
+    data = loaded.media_file_data[0].acoustid_data
     assert data is not None
     recording = data.results[0].recordings[0]
     assert (recording.id, recording.title, recording.length) == (REC_1, "Walking on Broken Glass", 252000)
@@ -214,14 +214,14 @@ def test_acoustid_then_musicbrainz_loads_with_mediascan_schema(
     from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
 
     path = tmp_path / "02 - Fresh.yml"
-    path.write_text(CORE + "trackIdData:\n  - fpcalcData: {duration: 252, fingerprint: AQADtE-example}\n")
+    path.write_text(CORE + "mediaFileData:\n  - fpcalcData: {duration: 252, fingerprint: AQADtE-example}\n")
     response = {"status": "ok", "results": [{"id": "match-1", "score": 0.9, "recordings": [{"id": REC_1}]}]}
     monkeypatch.setattr(acoustid, "urlopen", MagicMock(return_value=HttpResponse(json.dumps(response).encode())))
     assert acoustid.run("key", specific_file=path)
     assert musicbrainz.run(specific_file=path)
     loaded = load_track_yaml_file(path)
-    assert loaded.track_id_data is not None
-    data = loaded.track_id_data[0].acoustid_data
+    assert loaded.media_file_data is not None
+    data = loaded.media_file_data[0].acoustid_data
     assert data is not None
     assert data.results[0].recordings[0].title == "Walking on Broken Glass"
 
@@ -261,7 +261,7 @@ def test_fully_populated_track_does_not_count(track: Path, http_mock: MagicMock)
     done = track.with_name("00 - Done.yml")
     done.write_text(
         CORE
-        + "trackIdData:\n  - acoustidData:\n      status: ok\n      results:\n        - id: m\n          score: 1\n          recordings:\n"
+        + "mediaFileData:\n  - acoustidData:\n      status: ok\n      results:\n        - id: m\n          score: 1\n          recordings:\n"
         + f"            - {{id: {REC_1}, isrcs: [X]}}\n"
     )
     assert musicbrainz.run(specific_dir=track.parent, count=1)
@@ -271,7 +271,7 @@ def test_fully_populated_track_does_not_count(track: Path, http_mock: MagicMock)
 
 def test_missing_acoustid_data_warns(tmp_path: Path, http_mock: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
     path = tmp_path / "01.yml"
-    path.write_text(CORE + "trackIdData:\n  - spotifyId: x\n    acoustidData: {}\n")
+    path.write_text(CORE + "mediaFileData:\n  - path: /music/example.flac\n    acoustidData: {}\n")
     assert musicbrainz.run(specific_file=path)
     http_mock.assert_not_called()
     assert "run acoustid first" in caplog.text
@@ -430,16 +430,66 @@ def test_cli_dry_run_offline(track: Path, monkeypatch: pytest.MonkeyPatch, http_
 
 
 @pytest.mark.parametrize("overwrite", [False, True])
-def test_cli_passes_options(track: Path, monkeypatch: pytest.MonkeyPatch, overwrite: bool) -> None:
+@pytest.mark.parametrize("reverse", [False, True])
+def test_cli_passes_options(track: Path, monkeypatch: pytest.MonkeyPatch, overwrite: bool, reverse: bool) -> None:
     run = MagicMock(return_value=True)
     monkeypatch.setattr(musicbrainz, "run", run)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["musicbrainz", "--file", str(track), "-n", "--force", "--sleep", "2", *(["--overwrite"] if overwrite else [])],
+        ["musicbrainz", "--file", str(track), "-n", "--force", "--sleep", "2",
+         *(["--overwrite"] if overwrite else []), *(["--reverse"] if reverse else [])],
     )
     assert musicbrainz.main() == 0
-    assert run.call_args.args == (track, None, None, True, True, 2.0, False, overwrite)
+    assert run.call_args.args == (track, None, None, True, True, 2.0, False, overwrite, reverse)
+
+
+@pytest.mark.parametrize("collection", [False, True])
+@pytest.mark.parametrize("count", [None, 1])
+def test_reverse_traverses_files_in_exact_opposite_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, http_mock: MagicMock,
+    capsys: pytest.CaptureFixture[str], collection: bool, count: int | None,
+) -> None:
+    root = tmp_path / "data"
+    for index, name in enumerate(["z-album/02.yml", "z-album/01.yaml", "a-album/01.yml"]):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        recording_id = f"00000000-0000-0000-0000-{index:012d}"
+        path.write_text(TRACK.replace(REC_1, recording_id).replace(REC_2, recording_id))
+    # Ineligible files must not consume --count, even when encountered first.
+    (root / "z-album" / "99.yml").write_text(CORE)
+    (root / "artist.yml").write_text(TRACK)
+    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    specific_dir = None if collection else root
+    assert musicbrainz.run(specific_dir=specific_dir, dry_run=True, offline=True)
+    normal = capsys.readouterr().out.splitlines()
+    assert len(normal) == 3
+    originals = {path: path.read_text() for path in root.rglob("*") if path.is_file()}
+    assert musicbrainz.run(specific_dir=specific_dir, dry_run=True, offline=True, reverse=True, count=count)
+    expected = list(reversed(normal))
+    assert capsys.readouterr().out.splitlines() == expected[:count]
+    assert all(path.read_text() == content for path, content in originals.items())
+    http_mock.assert_not_called()
+
+
+def test_reverse_single_file_preserves_recording_order(
+    track: Path, http_mock: MagicMock, capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert musicbrainz.run(specific_file=track, dry_run=True, offline=True, reverse=True)
+    assert capsys.readouterr().out.splitlines() == [
+        musicbrainz.build_request(REC_1).full_url,
+        musicbrainz.build_request(REC_2).full_url,
+    ]
+    http_mock.assert_not_called()
+
+
+def test_reverse_count_zero_does_not_enumerate_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    def paths(specific_file: Path | None, specific_dir: Path | None):
+        raise AssertionError("count=0 must not enumerate files")
+        yield Path("unused")
+
+    monkeypatch.setattr(musicbrainz, "track_files", paths)
+    assert musicbrainz.run(count=0, reverse=True)
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -453,7 +503,7 @@ def test_overwrite_unchanged_musicbrainz_results(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     data = YAML(typ="safe").load(TRACK)
-    for result in data["trackIdData"][0]["acoustidData"]["results"]:
+    for result in data["mediaFileData"][0]["acoustidData"]["results"]:
         for recording in result["recordings"]:
             recording.update(SAVED_1 if recording["id"] == REC_1 else SAVED_2)
     original = json.dumps(data)
@@ -510,7 +560,7 @@ def test_interrupted_track_logs_pending_updates_without_saving(
 @pytest.mark.parametrize("mode", ["skipped", "offline", "failed", "not_found"])
 def test_overwrite_requires_successful_musicbrainz_lookup(track: Path, http_mock: MagicMock, mode: str) -> None:
     data = YAML(typ="safe").load(TRACK)
-    for result in data["trackIdData"][0]["acoustidData"]["results"]:
+    for result in data["mediaFileData"][0]["acoustidData"]["results"]:
         for recording in result["recordings"]:
             recording.update(SAVED_1)
     original = json.dumps(data)
@@ -559,7 +609,7 @@ def test_503_increases_sleep_for_later_requests(
     for index, recording_id in enumerate(ids):
         (tmp_path / f"{index:02}.yml").write_text(
             CORE
-            + "trackIdData:\n  - acoustidData:\n      status: ok\n      results:\n        - id: m\n          score: 1\n"
+            + "mediaFileData:\n  - acoustidData:\n      status: ok\n      results:\n        - id: m\n          score: 1\n"
             + f"          recordings: [{{id: {recording_id}}}]\n"
         )
     statuses = iter([503, 503, 200, 200, 200, 200])
@@ -581,7 +631,7 @@ def test_503_increases_sleep_for_later_requests(
     assert delays == pytest.approx([base + 0.5, base + 1.0, base + 0.9, base + 0.8, base + 0.7])
     assert "(temporary extra sleep 1.000)" in caplog.text
     assert (
-        YAML(typ="safe").load((tmp_path / "03.yml").read_text())["trackIdData"][0]["acoustidData"]["results"][0]["recordings"][
+        YAML(typ="safe").load((tmp_path / "03.yml").read_text())["mediaFileData"][0]["acoustidData"]["results"][0]["recordings"][
             0
         ]["title"]
         == "T"
@@ -592,8 +642,8 @@ def test_acoustid_output_loads_before_musicbrainz(track: Path) -> None:
     from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
 
     loaded = load_track_yaml_file(track)
-    assert loaded.track_id_data is not None
-    data = loaded.track_id_data[0].acoustid_data
+    assert loaded.media_file_data is not None
+    data = loaded.media_file_data[0].acoustid_data
     assert data is not None
     recording = data.results[0].recordings[1]
     assert (recording.id, recording.title, recording.isrcs) == (REC_2, None, None)

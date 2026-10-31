@@ -16,7 +16,7 @@ from mediascripts.acoustid import acoustid
 KEY = "private+key/with spaces"
 CORE = "# preserve me\ntrackData:\n  title: Track\n  artist: Artist\n"
 FINGERPRINT = (
-    "trackIdData:\n  - spotifyId: existing\n    fpcalcData:\n      duration: 203.75\n      fingerprint: AQADtE-example\n"
+    "mediaFileData:\n  - path: /music/existing.flac\n    fpcalcData:\n      duration: 203.75\n      fingerprint: AQADtE-example\n"
 )
 RESULT = {
     "status": "ok",
@@ -101,16 +101,16 @@ def test_lookup_saves_full_response_or_leaves_dry_run_untouched(
         assert proposal.parent.name.startswith("acoustid-proposal-")
         assert proposal.name == track.name
         document = YAML(typ="safe").load(proposal.read_text())
-        assert document["trackIdData"][0]["acoustidData"] == RESULT
+        assert document["mediaFileData"][0]["acoustidData"] == RESULT
         assert KEY not in proposal.read_text()
     else:
         assert command[1:] == [str(backup.resolve()), str(track.resolve())]
         document = YAML(typ="safe").load(track.read_text())
-        entry = document["trackIdData"][0]
+        entry = document["mediaFileData"][0]
         assert entry["acoustidData"] == RESULT
         assert "acoustidIds" not in entry
         assert "musicbrainzRecordingIds" not in entry
-        assert entry["spotifyId"] == "existing"
+        assert entry["path"] == "/music/existing.flac"
         assert entry["fpcalcData"]["duration"] == 203.75
         assert entry["fpcalcData"]["fingerprint"] == "AQADtE-example"
         assert track.read_text().startswith("# preserve me")
@@ -122,14 +122,14 @@ def test_lookup_saves_full_response_or_leaves_dry_run_untouched(
     "ids",
     [
         "",
-        "trackIdData: null\n",
-        "trackIdData: []\n",
-        "trackIdData:\n  - spotifyId: existing\n",
-        "trackIdData:\n  - fpcalcData: {duration: 203}\n",
-        "trackIdData:\n  - fpcalcData: {duration: 203, fingerprint: '  '}\n",
-        "trackIdData:\n  - fpcalcData: {duration: 0, fingerprint: AQAA}\n",
-        "trackIdData:\n  - fpcalcData: {duration: .nan, fingerprint: AQAA}\n",
-        "trackIdData:\n  - fpcalcData: {duration: true, fingerprint: AQAA}\n",
+        "mediaFileData: null\n",
+        "mediaFileData: []\n",
+        "mediaFileData:\n  - path: /music/existing.flac\n",
+        "mediaFileData:\n  - fpcalcData: {duration: 203}\n",
+        "mediaFileData:\n  - fpcalcData: {duration: 203, fingerprint: '  '}\n",
+        "mediaFileData:\n  - fpcalcData: {duration: 0, fingerprint: AQAA}\n",
+        "mediaFileData:\n  - fpcalcData: {duration: .nan, fingerprint: AQAA}\n",
+        "mediaFileData:\n  - fpcalcData: {duration: true, fingerprint: AQAA}\n",
     ],
 )
 def test_missing_fingerprint_or_duration_warns_without_request(
@@ -188,7 +188,7 @@ def test_multiple_fingerprints_count_as_one_track_and_are_rate_limited(
     delay = acoustid.time.sleep.call_args.args[0]
     assert delay == pytest.approx(acoustid.MIN_SLEEP - 0.1)
     assert delay > 1 / 3 - 0.1
-    entries = YAML(typ="safe").load(track.read_text())["trackIdData"]
+    entries = YAML(typ="safe").load(track.read_text())["mediaFileData"]
     assert all(entry["acoustidData"] == RESULT for entry in entries)
 
 
@@ -205,7 +205,7 @@ def test_error_on_one_track_does_not_stop_other_lookups(
     assert (tmp_path / "02.yml.bak").exists()
 
 
-@pytest.mark.parametrize("content", ["trackData: [", "[]", "trackIdData: []"])
+@pytest.mark.parametrize("content", ["trackData: [", "[]", "mediaFileData: []"])
 def test_invalid_explicit_track_is_reported(
     track: Path,
     http_mock: MagicMock,
@@ -318,7 +318,7 @@ def test_no_matches_or_unlinked_match(
     original = track.read_bytes()
     http_mock.return_value = HttpResponse(json.dumps(result).encode())
     assert acoustid.run(KEY, specific_file=track)
-    assert YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"] == result
+    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == result
     assert track.with_name(track.name + ".bak").read_bytes() == original
 
 
@@ -386,16 +386,14 @@ def test_only_acoustid_data_is_modified(track: Path, http_mock: MagicMock) -> No
     track.write_text(
         CORE
         + FINGERPRINT
-        + "    acoustidIds: [old-match, match-1]\n"
-        + "    musicbrainzRecordingIds: [old-recording]\n"
         + "    acoustidData: {status: ok, results: []}\n"
-        + "  - spotifyId: untouched\n"
+        + "  - path: /music/untouched.flac\n"
     )
     original = YAML(typ="safe").load(track.read_text())
     assert acoustid.run(KEY, specific_file=track, force=True)
     updated = YAML(typ="safe").load(track.read_text())
-    assert updated["trackIdData"][0].pop("acoustidData") == RESULT
-    original["trackIdData"][0].pop("acoustidData")
+    assert updated["mediaFileData"][0].pop("acoustidData") == RESULT
+    original["mediaFileData"][0].pop("acoustidData")
     assert updated == original
 
 
@@ -403,7 +401,7 @@ def test_full_response_retains_additional_fields(track: Path, http_mock: MagicMo
     response = {**RESULT, "extra": {"nested": [True, None, 42, "value"]}}
     http_mock.return_value = HttpResponse(json.dumps(response).encode())
     assert acoustid.run(KEY, specific_file=track)
-    assert YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"] == response
+    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == response
 
 
 def test_changed_source_is_not_overwritten(track: Path, http_mock: MagicMock) -> None:
@@ -476,14 +474,14 @@ def test_empty_acoustid_data_is_looked_up(track: Path, http_mock: MagicMock, exi
     track.write_text(track.read_text() + "    acoustidData: " + existing + "\n")
     assert acoustid.run(KEY, specific_file=track)
     http_mock.assert_called_once()
-    assert YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"] == RESULT
+    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == RESULT
 
 
 def test_force_looks_up_existing_acoustid_data(track: Path, http_mock: MagicMock) -> None:
     track.write_text(track.read_text() + "    acoustidData: {status: ok, results: []}\n")
     assert acoustid.run(KEY, specific_file=track, force=True)
     http_mock.assert_called_once()
-    assert YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"] == RESULT
+    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == RESULT
 
 
 def test_skipped_tracks_do_not_consume_count(track: Path, http_mock: MagicMock) -> None:
@@ -491,7 +489,7 @@ def test_skipped_tracks_do_not_consume_count(track: Path, http_mock: MagicMock) 
     done.write_text(track.read_text() + "    acoustidData: {status: ok, results: []}\n")
     assert acoustid.run(KEY, specific_dir=track.parent, count=1)
     http_mock.assert_called_once()
-    assert YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"] == RESULT
+    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == RESULT
 
 
 @pytest.mark.parametrize("overwrite", [False, True])
@@ -610,7 +608,7 @@ def test_missing_or_null_isrcs_are_saved_unchanged(track: Path, http_mock: Magic
     response = {"status": "ok", "results": [{"id": "match-1", "score": 0.9, "recordings": [recording]}]}
     http_mock.return_value = HttpResponse(json.dumps(response).encode())
     assert acoustid.run(KEY, specific_file=track)
-    saved = YAML(typ="safe").load(track.read_text())["trackIdData"][0]["acoustidData"]
+    saved = YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"]
     if recording.get("isrcs", []) is None:
         response["results"][0]["recordings"][0]["isrcs"] = []
     assert saved == response

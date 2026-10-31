@@ -78,6 +78,23 @@ def test_unquoted_string_lists_are_not_flagged_for_repair() -> None:
     assert not normalize_isrcs(data)
 
 
+def test_scalar_track_id_data_is_normalized() -> None:
+    data = YAML().load(
+        "trackIdData: {acoustidData: {results: [{recordings: [{id: one, isrcs: invalid}]}]}}"
+    )
+    assert normalize_isrcs(data)
+    assert data["trackIdData"]["acoustidData"]["results"][0]["recordings"][0]["isrcs"] == []
+
+
+def test_invalid_media_file_acoustid_isrc_lists_are_reset() -> None:
+    data = YAML().load(
+        "mediaFileData: [{acoustidData: {results: [{recordings: "
+        "[{id: one, isrcs: invalid}]}]}}]"
+    )
+    assert normalize_isrcs(data)
+    assert data["mediaFileData"][0]["acoustidData"]["results"][0]["recordings"][0]["isrcs"] == []
+
+
 def test_yaml_handles_strings_that_need_quoting() -> None:
     data = document(["123", "true"])
     normalize_isrcs(data)
@@ -90,7 +107,7 @@ def test_yaml_handles_strings_that_need_quoting() -> None:
 def test_bad_yaml_restores_valid_backup(tmp_path, dry_run: bool) -> None:
     path = tmp_path / "track.yml"
     bad = "trackData: {}\nisrcs: *undefined\n"
-    good = "trackData: {}\ntrackIdData: []\n"
+    good = "trackData: {}\ntrackIdData: {}\n"
     path.write_text(bad)
     backup = path.with_name(path.name + ".bak")
     backup.write_text(good)

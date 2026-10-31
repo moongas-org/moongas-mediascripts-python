@@ -67,44 +67,51 @@ def normalize_isrcs(document: object) -> bool:
     """Detach aliases and clear invalid ISRC values for re-lookup."""
     if not is_mapping(document):
         return False
-    identifiers = document.get("trackIdData")
-    if not is_list(identifiers):
-        return False
     changed = False
     seen_lists: set[int] = set()
-    for entry in identifiers:
-        if not is_mapping(entry):
+    for collection_key in ("trackIdData", "mediaFileData"):
+        collection = document.get(collection_key)
+        if collection_key == "trackIdData" and is_mapping(collection):
+            entries = [collection]
+        elif is_list(collection):
+            entries = collection
+        else:
             continue
-        data = entry.get("acoustidData")
-        if not is_mapping(data) or not is_list(results := data.get("results")):
-            continue
-        for result in results:
-            if not is_mapping(result) or not is_list(recordings := result.get("recordings")):
+        for entry in entries:
+            if not is_mapping(entry):
                 continue
-            for recording in recordings:
-                if not is_mapping(recording):
+            data = entry.get("acoustidData")
+            if not is_mapping(data) or not is_list(results := data.get("results")):
+                continue
+            for result in results:
+                if not is_mapping(result) or not is_list(recordings := result.get("recordings")):
                     continue
-                if "isrcs" not in recording:
-                    continue
-                value = recording.get("isrcs")
-                valid = is_list(value) and all(isinstance(item, str) and item.strip() for item in value)
-                if not valid:
-                    logger.warning(
-                        "Recording %r: invalid or missing isrcs %r; resetting to [] for lookup", recording.get("id"), value
-                    )
-                items = value if valid and is_list(value) else []
-                shared = is_list(value) and id(value) in seen_lists
-                if is_list(value):
-                    seen_lists.add(id(value))
-                normalized = deepcopy(value) if valid and isinstance(value, CommentedSeq) else CommentedSeq(items)
-                style = cast(_SequenceStyle, normalized)
-                style.yaml_set_anchor(None)
-                if (
-                    not isinstance(value, CommentedSeq)
-                    or cast(_SequenceStyle, value).anchor.value is not None
-                    or shared
-                    or not valid
-                ):
-                    changed = True
-                recording["isrcs"] = normalized
+                for recording in recordings:
+                    if not is_mapping(recording):
+                        continue
+                    if "isrcs" not in recording:
+                        continue
+                    value = recording.get("isrcs")
+                    valid = is_list(value) and all(isinstance(item, str) and item.strip() for item in value)
+                    if not valid:
+                        logger.warning(
+                            "Recording %r: invalid or missing isrcs %r; resetting to [] for lookup",
+                            recording.get("id"),
+                            value,
+                        )
+                    items = value if valid and is_list(value) else []
+                    shared = is_list(value) and id(value) in seen_lists
+                    if is_list(value):
+                        seen_lists.add(id(value))
+                    normalized = deepcopy(value) if valid and isinstance(value, CommentedSeq) else CommentedSeq(items)
+                    style = cast(_SequenceStyle, normalized)
+                    style.yaml_set_anchor(None)
+                    if (
+                        not isinstance(value, CommentedSeq)
+                        or cast(_SequenceStyle, value).anchor.value is not None
+                        or shared
+                        or not valid
+                    ):
+                        changed = True
+                    recording["isrcs"] = normalized
     return changed
