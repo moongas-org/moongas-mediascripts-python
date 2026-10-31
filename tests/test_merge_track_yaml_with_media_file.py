@@ -115,7 +115,6 @@ def test_accept_either_source_for_each_field(
     tags = EasyID3(track)
     tags[tag] = "2001-06-12" if field == "year" else "Different"
     tags.save(track)
-    before_yaml = track.with_suffix(".yml").read_bytes()
     before_media = track.read_bytes()
     monkeypatch.setattr("builtins.input", lambda prompt: choice)
 
@@ -129,8 +128,28 @@ def test_accept_either_source_for_each_field(
     document = yaml.safe_load(yaml_text)
     assert document["customField"] == "keep-this-too"
     assert document["trackIdData"]["streamingData"][0]["trackId"] == "keep-me"
+    assert len(document["mediaFileData"]) == 1
+    media_file = document["mediaFileData"][0]
+    assert media_file["path"] == str(track)
+    assert media_file["albumPath"] == str(track.parent)
+    assert media_file["artistPath"] == str(track.parent.parent)
+    assert media_file["size"] == track.stat().st_size
+    assert media_file["format"] == "mp3"
+    expected_media_values = {
+        "title": "Track",
+        "artist": "Artist",
+        "albumartist": "Artist",
+        "album": "Album",
+        "genre": "Rock",
+        "year": 1995,
+    }
+    if choice == "m":
+        expected_media_values[field] = 2001 if field == "year" else "Different"
+    for metadata_field, expected_value in expected_media_values.items():
+        assert media_file[metadata_field] == expected_value
+    assert "modTime" in media_file
     if choice in ("y", ""):
-        assert track.with_suffix(".yml").read_bytes() == before_yaml
+        assert document["trackData"][field] == expected_media_values[field]
     else:
         assert track.read_bytes() == before_media
         assert document["trackData"][field] == (2001 if field == "year" else "Different")
@@ -145,7 +164,6 @@ def test_accept_yaml_logs_copy_and_confirms_persisted_id3_tag(
     tags = EasyID3(track)
     tags["title"] = "Different title"
     tags.save(track)
-    before_yaml = track.with_suffix(".yml").read_bytes()
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
 
     with caplog.at_level(logging.INFO):
@@ -154,7 +172,9 @@ def test_accept_yaml_logs_copy_and_confirms_persisted_id3_tag(
     assert "Copying Track YAML title='Track' to MP3 ID3 title (previous=['Different title'])" in caplog.text
     assert "Saved MP3 ID3 title='Track' from Track YAML" in caplog.text
     assert EasyID3(track)["title"] == ["Track"]
-    assert track.with_suffix(".yml").read_bytes() == before_yaml
+    document = yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))
+    assert document["trackData"]["title"] == "Track"
+    assert document["mediaFileData"][0]["path"] == str(track)
 
 
 @pytest.mark.parametrize("field", list(TAG_FIELDS))
@@ -205,16 +225,18 @@ def test_custom_input_interruption_does_not_change_files(
 
 
 @pytest.mark.parametrize("choice", ["s"])
-def test_skip_leaves_both_files_unchanged(
+def test_skip_preserves_conflicting_metadata_but_adds_media_file_data(
     track: Path, monkeypatch: pytest.MonkeyPatch, choice: str
 ) -> None:
     tags = EasyID3(track)
     tags["title"] = "Different"
     tags.save(track)
-    before = (track.read_bytes(), track.with_suffix(".yml").read_bytes())
+    before_media = track.read_bytes()
     monkeypatch.setattr("builtins.input", lambda prompt: choice)
     assert not merge.merge_track(track)
-    assert (track.read_bytes(), track.with_suffix(".yml").read_bytes()) == before
+    assert track.read_bytes() == before_media
+    assert yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))["trackData"]["title"] == "Track"
+    assert yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))["mediaFileData"][0]["path"] == str(track)
 
 
 def test_invalid_input_reprompts_and_uppercase_shortcut_works(
@@ -243,23 +265,80 @@ def test_missing_or_multiple_media_values_cannot_be_copied_to_scalar_yaml(
     else:
         del tags["title"]
     tags.save(track)
-    before = track.with_suffix(".yml").read_bytes()
     choices = iter(["m", "s"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(choices))
     assert not merge.merge_track(track)
     assert "Cannot copy missing/multiple" in caplog.text
-    assert track.with_suffix(".yml").read_bytes() == before
+    document = yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))
+    assert document["trackData"]["title"] == "Track"
+    assert document["mediaFileData"][0]["path"] == str(track)
 
 
-def test_quiet_matching_track_does_not_prompt_or_write(
+def test_quiet_matching_track_adds_media_file_data_without_prompt(
     track: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("Unexpected prompt"))
-    before = (track.read_bytes(), track.with_suffix(".yml").read_bytes())
+    before_media = track.read_bytes()
     with caplog.at_level(logging.INFO):
         assert merge.merge_track(track, quiet=True)
-    assert caplog.text == ""
-    assert (track.read_bytes(), track.with_suffix(".yml").read_bytes()) == before
+    assert "Added missing MediaFileData fields" in caplog.text
+    assert track.read_bytes() == before_media
+    document = yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))
+    assert document["mediaFileData"][0]["format"] == "mp3"
+
+
+def test_existing_media_file_data_is_completed_without_overwriting_values(
+    track: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml_path = track.with_suffix(".yml")
+    original = yaml_path.read_text(encoding="utf-8")
+    yaml_path.write_text(
+        original.replace(
+            "customField: keep-this-too\n",
+            "mediaFileData:\n"
+            "  - path: preserved-path.mp3\n"
+            "    format: preserved-format\n"
+            "    fpcalcData:\n"
+            "      fingerprint: preserved-fingerprint\n"
+            "customField: keep-this-too\n",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("Unexpected prompt"))
+
+    assert merge.merge_track(track, quiet=True)
+
+    media_files = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))["mediaFileData"]
+    assert len(media_files) == 1
+    media_file = media_files[0]
+    assert media_file["path"] == "preserved-path.mp3"
+    assert media_file["format"] == "preserved-format"
+    assert media_file["fpcalcData"]["fingerprint"] == "preserved-fingerprint"
+    assert media_file["albumPath"] == str(track.parent)
+    assert media_file["artistPath"] == str(track.parent.parent)
+    assert media_file["size"] == track.stat().st_size
+
+
+def test_multiple_media_file_entries_are_rejected_without_data_loss(
+    track: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    yaml_path = track.with_suffix(".yml")
+    original = yaml_path.read_text(encoding="utf-8")
+    yaml_path.write_text(
+        original.replace(
+            "customField: keep-this-too\n",
+            "mediaFileData:\n  - path: first.mp3\n  - path: second.mp3\n"
+            "customField: keep-this-too\n",
+        ),
+        encoding="utf-8",
+    )
+    before = yaml_path.read_bytes()
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("Unexpected prompt"))
+
+    assert not merge.merge_track(track, quiet=True)
+
+    assert "Expected at most one mediaFileData entry per track" in caplog.text
+    assert yaml_path.read_bytes() == before
 
 
 @pytest.mark.parametrize("flag", ["-d", "--dir"])

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
+from mediascan.types.track import track_yaml_file_validator as validator
 from openai import APIConnectionError, APIStatusError, OpenAI
 
 from mediascripts.track.track_yaml import track_yaml_auto_populate as populate
@@ -41,9 +42,9 @@ def track(tmp_path: Path) -> Path:
     return path
 
 
-@pytest.mark.parametrize("field", sorted(populate.ID_FIELDS))
+@pytest.mark.parametrize("field", sorted(validator.ID_FIELDS))
 def test_all_track_identifier_fields_round_trip(field: str) -> None:
-    document = populate.validate_track_yaml_content(
+    document = validator.validate_track_yaml_content(
         CORE + f"trackIdData:\n  {field}:\n      - " + STREAMING_ENTRY
     )
     assert populate.has_identifiers(document)
@@ -58,7 +59,7 @@ FINGERPRINT_IDS = (
 
 
 def test_fingerprint_data_round_trips_but_is_not_a_streaming_identifier() -> None:
-    document = populate.validate_track_yaml_content(CORE + FINGERPRINT_IDS)
+    document = validator.validate_track_yaml_content(CORE + FINGERPRINT_IDS)
     assert not populate.has_identifiers(document)
     assert document["mediaFileData"] == [
         {"fpcalcData": {"duration": 123.5, "fingerprint": "AQAA-example-fingerprint"}}
@@ -71,7 +72,7 @@ def test_acoustid_data_is_kept_on_media_file_and_is_not_a_streaming_identifier()
         "      status: ok\n"
         "      results: [{id: match-1, score: 0.9, recordings: [{id: recording-1}]}]\n"
     )
-    document = populate.validate_track_yaml_content(content)
+    document = validator.validate_track_yaml_content(content)
     assert not populate.has_identifiers(document)
 
 
@@ -85,11 +86,11 @@ def test_full_acoustid_response_is_accepted_and_preserved() -> None:
         + "          score: 0.9\n"
         + "          recordings: [{id: recording-1, title: Track, length: 203000, isrcs: [USSM18500120]}]\n"
     )
-    document = populate.validate_track_yaml_content(content)
-    completed = populate.validate_track_yaml_content(content + COMPLETE.removeprefix(CORE))
+    document = validator.validate_track_yaml_content(content)
+    completed = validator.validate_track_yaml_content(content + COMPLETE.removeprefix(CORE))
     populate.preserve_existing_values(document, completed)
-    assert "acoustidData" not in populate.ID_FIELDS
-    modified = populate.validate_track_yaml_content(content.replace("score: 0.9", "score: 0.1"))
+    assert "acoustidData" not in validator.ID_FIELDS
+    modified = validator.validate_track_yaml_content(content.replace("score: 0.9", "score: 0.1"))
     with pytest.raises(ValueError, match="changed existing track identifiers"):
         populate.preserve_existing_values(document, modified)
 
@@ -158,14 +159,14 @@ def test_model_cannot_add_or_change_fingerprint(track: Path, original: str) -> N
 ])
 def test_invalid_fingerprint_shape_is_rejected(value: str) -> None:
     with pytest.raises(ValueError, match="fpcalcData"):
-        populate.validate_track_yaml_content(CORE + f"mediaFileData:\n  - fpcalcData: {value}\n")
+        validator.validate_track_yaml_content(CORE + f"mediaFileData:\n  - fpcalcData: {value}\n")
 
 
 @pytest.mark.parametrize(
     "identifiers", ["", "trackIdData: null\n", "trackIdData: {}\n", "trackIdData:\n  streamingData: []\n"]
 )
 def test_missing_identifiers_are_not_complete(identifiers: str) -> None:
-    assert not populate.has_identifiers(populate.validate_track_yaml_content(CORE + identifiers))
+    assert not populate.has_identifiers(validator.validate_track_yaml_content(CORE + identifiers))
 
 
 @pytest.mark.parametrize(
@@ -244,7 +245,7 @@ def test_model_numeric_service_ids_are_quoted_without_losing_digits(
         assert track.read_text() == CORE
         assert not track.with_name(track.name + ".bak").exists()
     else:
-        document = populate.validate_track_yaml_content(track.read_text())
+        document = validator.validate_track_yaml_content(track.read_text())
         assert document["trackIdData"]["streamingData"][0]["trackId"] == digits
         assert track.with_name(track.name + ".bak").read_text() == CORE
 

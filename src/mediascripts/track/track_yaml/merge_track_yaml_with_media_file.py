@@ -16,13 +16,16 @@ import logging
 import re
 import sys
 from collections.abc import Mapping, MutableMapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, cast
 
+import mutagen
 import readchar
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
+from mediascan.types.track.track_data import TrackData
 from mediascripts.track.track_yaml.track_yaml_common import (
     TAG_FIELDS,
     TRACK_ERRORS,
@@ -44,6 +47,14 @@ class _RoundTripYaml(Protocol):
 
 class _TagWriter(Protocol):
     def save(self, filething: Path) -> None: ...
+
+
+class _AudioInfo(Protocol):
+    length: float
+
+
+class _Audio(Protocol):
+    info: _AudioInfo
 
 
 def read_choice(prompt: str) -> str:
@@ -94,6 +105,78 @@ def save_yaml_value(yaml_path: Path, field: str, value: str | int) -> None:
         raise ValueError("Expected a trackData mapping")
     cast(MutableMapping[str, object], data)[field] = value
     save_yaml_atomically(yaml_path, lambda stream: round_trip_yaml.dump(document, stream))
+
+
+def add_missing_media_file_data(
+    yaml_path: Path,
+    track_path: Path,
+    track_data: TrackData,
+    tags: Mapping[str, list[str]],
+) -> bool:
+    """Fill absent media-file metadata while preserving existing YAML values."""
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    round_trip_yaml = cast(_RoundTripYaml, yaml)
+    document = cast(MutableMapping[str, object], round_trip_yaml.load(yaml_path))
+    key = "media_file_data" if "media_file_data" in document and "mediaFileData" not in document else "mediaFileData"
+    media_file_data = document.get(key)
+    if media_file_data is None:
+        entries: list[object] = []
+    elif isinstance(media_file_data, list):
+        entries = cast(list[object], media_file_data)
+        if len(entries) > 1:
+            raise ValueError("Expected at most one mediaFileData entry per track")
+    else:
+        raise ValueError("Expected mediaFileData to be a list")
+
+    if entries:
+        entry = entries[0]
+        if not isinstance(entry, MutableMapping):
+            raise ValueError("Expected mediaFileData[0] to be a mapping")
+        media_file = cast(MutableMapping[str, object], entry)
+    else:
+        media_file: MutableMapping[str, object] = {}
+        entries.append(media_file)
+        document[key] = entries
+
+    file_stat = track_path.stat()
+    metadata_values: dict[str, object] = {
+        "path": str(track_path),
+        "albumPath": str(track_path.parent),
+        "artistPath": str(track_path.parent.parent),
+        "size": file_stat.st_size,
+        "format": track_path.suffix.lstrip(".").lower(),
+        "title": next(iter(tags.get("title", [])), track_data.title),
+        "artist": next(iter(tags.get("artist", [])), track_data.artist),
+        "albumartist": next(iter(tags.get("albumartist", [])), track_data.albumartist),
+        "album": next(iter(tags.get("album", [])), track_data.album),
+        "genre": next(iter(tags.get("genre", [])), track_data.genre),
+        "year": _tag_year(next(iter(tags.get("date", [])), str(track_data.year)), track_data.year),
+        "modTime": datetime.fromtimestamp(file_stat.st_mtime, timezone.utc),
+    }
+    if media_file.get("duration") is None:
+        try:
+            audio = cast(_Audio | None, mutagen.File(track_path))
+        except mutagen.MutagenError as error:
+            logger.warning("[%s] Could not read media duration: %s", track_path, error)
+            audio = None
+        if audio is not None:
+            metadata_values["duration"] = audio.info.length
+
+    changed = False
+    for field, value in metadata_values.items():
+        if media_file.get(field) is None:
+            media_file[field] = value
+            changed = True
+
+    if changed:
+        save_yaml_atomically(yaml_path, lambda stream: round_trip_yaml.dump(document, stream))
+    return changed
+
+
+def _tag_year(value: str, fallback: int) -> int:
+    match = re.match(r"\d{4}", value)
+    return int(match.group()) if match else fallback
 
 
 def merge_track(track_path: Path, quiet: bool = False) -> bool:
@@ -155,6 +238,8 @@ def merge_track(track_path: Path, quiet: bool = False) -> bool:
                 logger.info("[%s] Skipped %s", track_path, field)
         if not differences and not quiet:
             logger.info("[%s] Track YAML matches media file tags", track_path)
+        if add_missing_media_file_data(track_path.with_suffix(".yml"), track_path, track_data, writable_tags):
+            logger.info("[%s] Added missing MediaFileData fields", track_path)
         return resolved
     except (*TRACK_ERRORS, YAMLError) as error:
         logger.error("[%s] Could not merge: %s", track_path, error)

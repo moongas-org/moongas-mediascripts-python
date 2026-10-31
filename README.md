@@ -274,7 +274,7 @@ not ISRC strings. Sharing one cached list between recording entries previously
 caused ruamel to emit these references. Each entry now gets an independent list,
 and existing references are expanded without losing their identifiers.
 
-The current source targets `mediascan` 1.2.4 or newer: metadata types and YAML
+The current source targets `mediascan` 1.2.5 or newer: metadata types and YAML
 helpers under `mediascan.types`, and database
 loading under `mediascan.utils.db.mediascan_db_loader`. When developing against
 that sibling checkout, install its current source into the same environment
