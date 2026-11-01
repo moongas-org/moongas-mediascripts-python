@@ -135,6 +135,10 @@ status without saving the failed track.
 
 ### Spotify track identifiers
 
+The Spotify package separates API requests, rate limiting, and caching into
+`client.py`, track identifier validation and YAML updates into `track_yaml.py`,
+and command-line orchestration into `spotify.py`.
+
 Set `SPOTIFY_API_CLIENT_ID` and `SPOTIFY_API_CLIENT_SECRET` to your Spotify
 Developer application credentials, then run:
 

@@ -10,15 +10,16 @@ import pytest
 import requests
 from ruamel.yaml import YAML
 
-from mediascripts.spotify import spotify
+from mediascripts.spotify import client as spotify_api
+from mediascripts.spotify import spotify, track_yaml
 
 
 def test_get_access_token_returns_valid_token(monkeypatch: pytest.MonkeyPatch) -> None:
     post = MagicMock()
     post.return_value.status_code = 200
     post.return_value.json.return_value = {"access_token": "token"}
-    monkeypatch.setattr(spotify.requests, "post", post)
-    assert spotify.get_access_token("client", "secret") == "token"
+    monkeypatch.setattr(spotify_api.requests, "post", post)
+    assert spotify_api.get_access_token("client", "secret") == "token"
     assert post.call_args.kwargs["timeout"] == 30
 
 
@@ -27,17 +28,17 @@ def test_get_access_token_rejects_invalid_payload(monkeypatch: pytest.MonkeyPatc
     post = MagicMock()
     post.return_value.status_code = 200
     post.return_value.json.return_value = payload
-    monkeypatch.setattr(spotify.requests, "post", post)
+    monkeypatch.setattr(spotify_api.requests, "post", post)
     with pytest.raises(ValueError):
-        spotify.get_access_token("client", "secret")
+        spotify_api.get_access_token("client", "secret")
 
 
 def test_get_track_by_isrc_returns_validated_tracks(monkeypatch: pytest.MonkeyPatch) -> None:
     get = MagicMock()
     get.return_value.status_code = 200
     get.return_value.json.return_value = RAW_API_RESPONSE
-    monkeypatch.setattr(spotify.requests, "get", get)
-    assert spotify.get_track_by_isrc("US123", "token") == [MATCH]
+    monkeypatch.setattr(spotify_api.requests, "get", get)
+    assert spotify_api.get_track_by_isrc("US123", "token") == [MATCH]
     assert get.call_args.kwargs["headers"]["Authorization"] == "Bearer token"
     assert get.call_args.kwargs["params"] == {"q": "isrc:US123", "type": "track"}
     assert get.call_args.kwargs["timeout"] == 30
@@ -56,9 +57,9 @@ def test_get_track_by_isrc_rejects_invalid_payload(monkeypatch: pytest.MonkeyPat
     get = MagicMock()
     get.return_value.status_code = 200
     get.return_value.json.return_value = payload
-    monkeypatch.setattr(spotify.requests, "get", get)
+    monkeypatch.setattr(spotify_api.requests, "get", get)
     with pytest.raises(ValueError):
-        spotify.get_track_by_isrc("US123", "token")
+        spotify_api.get_track_by_isrc("US123", "token")
 
 
 CORE = "# preserve me\ntrackData:\n  title: Song\ncustomField: keep\n"
@@ -98,7 +99,7 @@ RAW_API_RESPONSE: dict[str, object] = {
     },
     "futureResponseField": {"preserved": True},
 }
-MATCH: spotify.SpotifyTrack = {
+MATCH: spotify_api.SpotifyTrack = {
     "name": "Song",
     "id": "track-id",
     "external_urls": {"spotify": "https://open.spotify.com/track/track-id"},
@@ -125,15 +126,15 @@ def isolate_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         return make_directory(prefix=prefix, dir=tmp_path)
 
     monkeypatch.setattr(spotify.tempfile, "mkdtemp", create_directory)
-    monkeypatch.setattr(spotify.time, "sleep", MagicMock())
+    monkeypatch.setattr(spotify_api.time, "sleep", MagicMock())
 
 
 @pytest.fixture
 def api(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
     token = MagicMock(return_value="access-token")
     search = MagicMock(return_value=[deepcopy(MATCH)])
-    monkeypatch.setattr(spotify, "get_access_token", token)
-    monkeypatch.setattr(spotify, "get_track_by_isrc", search)
+    monkeypatch.setattr(spotify_api, "get_access_token", token)
+    monkeypatch.setattr(spotify_api, "get_track_by_isrc", search)
     return token, search
 
 
@@ -245,7 +246,7 @@ def test_offline_needs_no_credentials_and_never_calls_api(
     for mock in api:
         mock.assert_not_called()
     assert track.read_text() == TRACK
-    cast(MagicMock, spotify.time.sleep).assert_not_called()
+    cast(MagicMock, spotify_api.time.sleep).assert_not_called()
     assert not list(track.parent.glob("spotify-proposal-*"))
     assert not track.with_name(track.name + ".bak").exists()
 
@@ -291,7 +292,7 @@ def test_deduplicates_normalized_isrcs_before_lookup(
         + "      results: [{recordings: [{isrcs: [USABC9500001, GBBBL9600109]}]}]\n"
     )
     original = track.read_text()
-    prepared = spotify.identifier_entries(load(track), track)
+    prepared = track_yaml.identifier_entries(load(track), track)
     assert len(prepared) == 1
     assert [isrc for _, isrcs in prepared for isrc, _ in isrcs] == [
         "USABC9500001", "GBBBL9600109",
@@ -344,10 +345,10 @@ def test_empty_search_responses_try_remaining_isrcs_with_delay(
         return response
 
     search = MagicMock(side_effect=get)
-    monkeypatch.setattr(spotify, "get_access_token", MagicMock(return_value="access-token"))
-    monkeypatch.setattr(spotify.requests, "get", search)
-    monkeypatch.setattr(spotify.time, "monotonic", lambda: now)
-    monkeypatch.setattr(spotify.time, "sleep", wait)
+    monkeypatch.setattr(spotify_api, "get_access_token", MagicMock(return_value="access-token"))
+    monkeypatch.setattr(spotify_api.requests, "get", search)
+    monkeypatch.setattr(spotify_api.time, "monotonic", lambda: now)
+    monkeypatch.setattr(spotify_api.time, "sleep", wait)
 
     with caplog.at_level(logging.INFO):
         assert spotify.run(specific_file=track, sleep=sleep)
@@ -503,7 +504,7 @@ def test_retries_and_failure_cache(track: Path, api: tuple[MagicMock, MagicMock]
     )
     api[1].side_effect = requests.ConnectionError("network unavailable")
     assert not spotify.run(specific_file=track)
-    assert api[1].call_count == spotify.MAX_ATTEMPTS * 2
+    assert api[1].call_count == spotify_api.MAX_ATTEMPTS * 2
     assert not track.with_name(track.name + ".bak").exists()
 
 
@@ -531,12 +532,12 @@ def test_scalar_track_id_data_uses_first_successful_isrc(
 def test_http_retry_refresh_and_backoff(
     api: tuple[MagicMock, MagicMock], monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
-    monkeypatch.setattr(spotify.time, "monotonic", lambda: 100.0)
-    api[1].side_effect = [spotify.SpotifyHTTPError(status, 8), [MATCH]]
-    client = spotify.SpotifyClient("client-credential", "secret-credential", spotify.MIN_SLEEP)
+    monkeypatch.setattr(spotify_api.time, "monotonic", lambda: 100.0)
+    api[1].side_effect = [spotify_api.SpotifyHTTPError(status, 8), [MATCH]]
+    client = spotify_api.SpotifyClient("client-credential", "secret-credential", spotify_api.MIN_SLEEP)
     assert client.lookup("USABC9500001") == [MATCH]
     assert api[0].call_count == (2 if status == 401 else 1)
-    delays = [call.args[0] for call in cast(MagicMock, spotify.time.sleep).call_args_list]
+    delays = [call.args[0] for call in cast(MagicMock, spotify_api.time.sleep).call_args_list]
     assert max(delays) >= (8 if status == 429 else spotify.MIN_SLEEP)
     if status == 503:
         assert max(delays) >= spotify.MIN_SLEEP + 0.5
@@ -547,19 +548,19 @@ def test_http_retry_refresh_and_backoff(
 
 def test_authentication_retries(api: tuple[MagicMock, MagicMock]) -> None:
     api[0].side_effect = [requests.Timeout("timeout"), "access-token"]
-    assert spotify.SpotifyClient("client-credential", "secret-credential", spotify.MIN_SLEEP).lookup("USABC9500001")
+    assert spotify_api.SpotifyClient("client-credential", "secret-credential", spotify_api.MIN_SLEEP).lookup("USABC9500001")
     assert api[0].call_count == 2
 
 
 def test_permanent_http_error_is_not_retried(api: tuple[MagicMock, MagicMock]) -> None:
-    api[1].side_effect = spotify.SpotifyHTTPError(403)
+    api[1].side_effect = spotify_api.SpotifyHTTPError(403)
     with pytest.raises(ValueError, match="Giving up"):
-        spotify.SpotifyClient("client-credential", "secret-credential", spotify.MIN_SLEEP).lookup("USABC9500001")
+        spotify_api.SpotifyClient("client-credential", "secret-credential", spotify_api.MIN_SLEEP).lookup("USABC9500001")
     api[1].assert_called_once()
 
 
 def test_concurrent_edit_is_not_overwritten(track: Path, api: tuple[MagicMock, MagicMock]) -> None:
-    def edit(*args: object) -> list[spotify.SpotifyTrack]:
+    def edit(*args: object) -> list[spotify_api.SpotifyTrack]:
         track.write_text(TRACK + "concurrent: change\n")
         return [MATCH]
 
@@ -641,9 +642,9 @@ def test_authentication_body_and_secrets_are_not_logged(
     post = MagicMock()
     post.return_value.status_code = 200
     post.return_value.json.return_value = {"access_token": "private-token"}
-    monkeypatch.setattr(spotify.requests, "post", post)
+    monkeypatch.setattr(spotify_api.requests, "post", post)
     with caplog.at_level(logging.INFO):
-        assert spotify.get_access_token("private-client", "private-secret") == "private-token"
+        assert spotify_api.get_access_token("private-client", "private-secret") == "private-token"
     assert not any(secret in caplog.text for secret in ("private-client", "private-secret", "private-token"))
 
 
@@ -655,9 +656,9 @@ def test_search_http_errors_are_not_successful_empty_results(
     response.status_code = status
     response._content = b'{"error": "failed"}'
     response.headers["Retry-After"] = "7"
-    monkeypatch.setattr(spotify.requests, "get", MagicMock(return_value=response))
-    with pytest.raises(spotify.SpotifyHTTPError) as error:
-        spotify.get_track_by_isrc("USABC9500001", "access-token")
+    monkeypatch.setattr(spotify_api.requests, "get", MagicMock(return_value=response))
+    with pytest.raises(spotify_api.SpotifyHTTPError) as error:
+        spotify_api.get_track_by_isrc("USABC9500001", "access-token")
     assert error.value.status == status
     assert error.value.retry_after == (7 if status == 429 else 0)
 
@@ -680,8 +681,8 @@ def test_real_request_flow(
     get = MagicMock()
     get.return_value.status_code = 200
     get.return_value.json.return_value = RAW_API_RESPONSE
-    monkeypatch.setattr(spotify.requests, "post", post)
-    monkeypatch.setattr(spotify.requests, "get", get)
+    monkeypatch.setattr(spotify_api.requests, "post", post)
+    monkeypatch.setattr(spotify_api.requests, "get", get)
     with caplog.at_level(logging.INFO):
         assert spotify.run(specific_file=track)
     assert get.call_args.kwargs["headers"]["Authorization"] == "Bearer private-token"
@@ -716,7 +717,7 @@ def test_yaml_aliases_cannot_change_unrelated_fields(track: Path, api: tuple[Mag
 
 def test_empty_results_are_cached(api: tuple[MagicMock, MagicMock]) -> None:
     api[1].return_value = []
-    client = spotify.SpotifyClient("client-credential", "secret-credential", spotify.MIN_SLEEP)
+    client = spotify_api.SpotifyClient("client-credential", "secret-credential", spotify_api.MIN_SLEEP)
     assert client.lookup("USABC9500001") == []
     assert client.lookup("USABC9500001") == []
     api[1].assert_called_once()
@@ -727,7 +728,7 @@ def test_invalid_retry_after_is_logged(header: str, caplog: pytest.LogCaptureFix
     response = requests.Response()
     response.status_code = 429
     response.headers["Retry-After"] = header
-    assert spotify.retry_after_seconds(response) == 0
+    assert spotify_api.retry_after_seconds(response) == 0
     assert "Invalid Spotify Retry-After" in caplog.text
 
 
