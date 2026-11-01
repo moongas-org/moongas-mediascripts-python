@@ -328,6 +328,8 @@ def identifier_entries(
                 item for item in new_media_isrcs
                 if all(existing != item[0] for existing, _ in target_isrcs)
             )
+    for _, isrcs in entries:
+        isrcs.sort(key=lambda item: item[0], reverse=True)
     return [entry for entry in entries if entry[1]]
 
 

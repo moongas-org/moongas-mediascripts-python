@@ -176,7 +176,7 @@ def test_updates_only_spotify_fields_and_preserves_backup(
         "trackUrl": MATCH["external_urls"]["spotify"],
         "trackId": MATCH["id"],
         "apiData": RAW_API_RESPONSE,
-        "isrc": "USABC9500001",
+        "isrc": "USABC9500002",
     }
     parent["streamingData"].remove(entry)  # type: ignore[union-attr]
     assert after == before
@@ -185,7 +185,7 @@ def test_updates_only_spotify_fields_and_preserves_backup(
     assert backup.read_text() == TRACK
     assert shlex.split(capsys.readouterr().out) == ["meld", str(backup), str(track)]
     api[0].assert_called_once_with("client-credential", "secret-credential")
-    api[1].assert_called_once_with("USABC9500001", "access-token")
+    api[1].assert_called_once_with("USABC9500002", "access-token")
 
 
 def test_acoustid_isrcs_create_streaming_entry_when_track_ids_are_absent(
@@ -240,7 +240,7 @@ def test_offline_needs_no_credentials_and_never_calls_api(
     monkeypatch.delenv("SPOTIFY_API_CLIENT_SECRET")
     assert spotify.run(specific_file=track, dry_run=True, offline=True, overwrite=True)
     assert capsys.readouterr().out.splitlines() == [
-        spotify.search_url("USABC9500001"), spotify.search_url("USABC9500002")
+        spotify.search_url("USABC9500002"), spotify.search_url("USABC9500001")
     ]
     for mock in api:
         mock.assert_not_called()
@@ -257,7 +257,7 @@ def test_nested_isrcs_and_first_result(track: Path, api: tuple[MagicMock, MagicM
     api[1].return_value = [MATCH, second]
     assert spotify.run(specific_file=track)
     assert spotify_entry(entries(load(track))[0])["trackId"] == "track-id"
-    api[1].assert_called_once_with("USABC9500001", "access-token")
+    api[1].assert_called_once_with("USABC9500002", "access-token")
 
 
 def test_falls_back_to_next_isrc_after_no_match(track: Path, api: tuple[MagicMock, MagicMock]) -> None:
@@ -265,6 +265,25 @@ def test_falls_back_to_next_isrc_after_no_match(track: Path, api: tuple[MagicMoc
     assert spotify.run(specific_file=track)
     assert api[1].call_count == 2
     assert spotify_entry(entries(load(track))[0])["trackId"] == "track-id"
+
+
+def test_isrc_lookup_prefers_us_codes_before_aus_codes(
+    track: Path, api: tuple[MagicMock, MagicMock]
+) -> None:
+    track.write_text(
+        TRACK.replace("        isrc: USABC9500001\n", "        isrc: AUSABC9500001\n").replace(
+            "[USABC9500001, USABC9500002]",
+            "[AUSABC9500001, USABC9500001]",
+        )
+    )
+    api[1].side_effect = [[], [MATCH]]
+
+    assert spotify.run(specific_file=track)
+
+    api[1].assert_has_calls([
+        (("USABC9500001", "access-token"), {}),
+        (("AUSABC9500001", "access-token"), {}),
+    ])
 
 
 def test_existing_complete_entry_skips_unless_forced(track: Path, api: tuple[MagicMock, MagicMock]) -> None:
@@ -403,8 +422,8 @@ def test_scalar_track_id_data_uses_first_successful_isrc(
     identifiers = entries(load(track))
     assert spotify_entry(identifiers[0])["trackId"] == "track-id"
     api[1].assert_has_calls([
-        (("USABC9500001", "access-token"), {}),
         (("USABC9500002", "access-token"), {}),
+        (("USABC9500001", "access-token"), {}),
     ])
 
 
