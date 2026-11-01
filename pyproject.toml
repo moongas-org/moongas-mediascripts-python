@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mediascripts"
-version = "1.2.6"
+version = "1.2.7"
 requires-python = ">=3.11"
 authors = [{ name = "moongas.org", email = "moongas.org@gmail.com" }]
 maintainers = [{ name = "moongas.org", email = "moongas.org@gmail.com" }]
@@ -41,8 +41,8 @@ classifiers = [
 ]
 
 dependencies = [
-  "mediascan >= 1.2.5",
-  "mediatest >= 1.2.1",
+  "mediascan >= 1.2.7",
+  "mediatest >= 1.2.7",
   "mutagen>=1.47.0",
   "readchar>=4.2.1",
   "requests>=2.32.0",
