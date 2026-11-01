@@ -467,7 +467,7 @@ def run(
             changed = False
             lookup_succeeded = False
             for entry, isrcs in entries:
-                for isrc, source_isrc in isrcs:
+                for isrc_index, (isrc, source_isrc) in enumerate(isrcs):
                     logger.info("[%s] Looking up Spotify track for ISRC %s", path, isrc)
                     try:
                         matches = client.lookup(isrc)
@@ -476,7 +476,10 @@ def run(
                         succeeded = False
                         continue
                     if not matches:
-                        logger.info("[%s] No Spotify match for %s; fields unchanged", path, isrc)
+                        logger.info(
+                            "[%s] No Spotify match for %s; %d ISRC(s) remaining to try",
+                            path, isrc, len(isrcs) - isrc_index - 1,
+                        )
                         continue
                     if len(matches) > 1:
                         logger.info("[%s] %d Spotify matches for %s; using the first", path, len(matches), isrc)

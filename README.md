@@ -154,10 +154,12 @@ symlinks and exclude collection metadata files. Discovered track files are
 collected and processed in random order rather than traversal order. The count
 limits eligible track files, not individual ISRC requests.
 
-Each `trackIdData.streamingData[]` entry is searched using its `isrc`,
-followed by distinct ISRCs in
-`mediaFileData[].acoustidData.results[].recordings[].isrcs`. Search values are
-trimmed, uppercased, and stripped of hyphens without changing source ISRCs.
+ISRCs are collected from `trackIdData.streamingData[]` and
+`mediaFileData[].acoustidData.results[].recordings[].isrcs`, deduplicated, and
+searched in reverse alphabetical order (`US...` before `AUS...`). Search values
+are trimmed, uppercased, and stripped of hyphens without changing source ISRCs.
+An empty `tracks.items` response advances to the next ISRC after the normal
+request-spacing delay, until a match is found or all candidates are exhausted.
 The first ISRC returning a match wins; if Spotify returns multiple tracks, the
 first result is used. A `streamingData` entry with `streamingService: spotify`,
 `trackId`, `trackUrl`, the complete search response in `apiData`, and the source

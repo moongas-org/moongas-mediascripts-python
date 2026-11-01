@@ -267,6 +267,106 @@ def test_falls_back_to_next_isrc_after_no_match(track: Path, api: tuple[MagicMoc
     assert spotify_entry(entries(load(track))[0])["trackId"] == "track-id"
 
 
+@pytest.mark.parametrize("streaming_isrcs", [True, False])
+def test_deduplicates_normalized_isrcs_before_lookup(
+    track: Path, api: tuple[MagicMock, MagicMock], streaming_isrcs: bool
+) -> None:
+    streaming = (
+        "trackIdData:\n"
+        "  streamingData:\n"
+        "    - {streamingService: apple-music, trackUrl: url, trackId: one, apiData: null, isrc: ' us-abc-95-00001 '}\n"
+        "    - {streamingService: deezer, trackUrl: url, trackId: two, apiData: null, isrc: USABC9500001}\n"
+    )
+    track.write_text(
+        CORE
+        + (streaming if streaming_isrcs else "")
+        + "mediaFileData:\n"
+        + "  - acoustidData:\n"
+        + "      results:\n"
+        + "        - recordings:\n"
+        + "            - {isrcs: [USABC9500001, USABC9500001, ' us-abc-95-00001 ']}\n"
+        + "            - {isrcs: [GBBBL9600109, ' gb-bbl-96-00109 ']}\n"
+        + "        - recordings: [{isrcs: [USABC9500001, GBBBL9600109]}]\n"
+        + "  - acoustidData:\n"
+        + "      results: [{recordings: [{isrcs: [USABC9500001, GBBBL9600109]}]}]\n"
+    )
+    original = track.read_text()
+    prepared = spotify.identifier_entries(load(track), track)
+    assert len(prepared) == 1
+    assert [isrc for _, isrcs in prepared for isrc, _ in isrcs] == [
+        "USABC9500001", "GBBBL9600109",
+    ]
+    for mock in api:
+        mock.assert_not_called()
+
+    api[1].return_value = []
+    assert spotify.run(specific_file=track)
+
+    assert [call.args[0] for call in api[1].call_args_list] == [
+        "USABC9500001", "GBBBL9600109",
+    ]
+    assert track.read_text() == original
+
+
+@pytest.mark.parametrize("sleep", [spotify.MIN_SLEEP, 2.5])
+@pytest.mark.parametrize("last_isrc_matches", [True, False])
+def test_empty_search_responses_try_remaining_isrcs_with_delay(
+    track: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sleep: float,
+    last_isrc_matches: bool,
+) -> None:
+    track.write_text(
+        TRACK.replace(
+            "[USABC9500001, USABC9500002]",
+            "[AUSABC9500001, GBBBL9600109, USABC9500001]",
+        )
+    )
+    original = track.read_text()
+    empty_response: dict[str, object] = {"tracks": {"total": 0, "items": []}}
+    response = MagicMock()
+    response.status_code = 200
+    response.json.side_effect = [
+        empty_response,
+        empty_response,
+        RAW_API_RESPONSE if last_isrc_matches else empty_response,
+    ]
+    now = 100.0
+    request_times: list[float] = []
+
+    def wait(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def get(*_args: object, **_kwargs: object) -> MagicMock:
+        request_times.append(now)
+        return response
+
+    search = MagicMock(side_effect=get)
+    monkeypatch.setattr(spotify, "get_access_token", MagicMock(return_value="access-token"))
+    monkeypatch.setattr(spotify.requests, "get", search)
+    monkeypatch.setattr(spotify.time, "monotonic", lambda: now)
+    monkeypatch.setattr(spotify.time, "sleep", wait)
+
+    with caplog.at_level(logging.INFO):
+        assert spotify.run(specific_file=track, sleep=sleep)
+
+    assert [call.kwargs["params"]["q"] for call in search.call_args_list] == [
+        "isrc:USABC9500001", "isrc:GBBBL9600109", "isrc:AUSABC9500001",
+    ]
+    assert [later - earlier for earlier, later in zip(request_times, request_times[1:])] == (
+        pytest.approx([sleep, sleep])
+    )
+    assert "No Spotify match for GBBBL9600109; 1 ISRC(s) remaining to try" in caplog.text
+    if last_isrc_matches:
+        assert spotify_entry(entries(load(track))[0])["isrc"] == "AUSABC9500001"
+    else:
+        assert track.read_text() == original
+        assert not track.with_name(track.name + ".bak").exists()
+        assert "No Spotify match for AUSABC9500001; 0 ISRC(s) remaining to try" in caplog.text
+
+
 def test_isrc_lookup_prefers_us_codes_before_aus_codes(
     track: Path, api: tuple[MagicMock, MagicMock]
 ) -> None:
