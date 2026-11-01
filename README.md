@@ -150,8 +150,9 @@ python -m mediascripts.spotify.spotify --help
 Spotify accepts the same mutually exclusive `--file` / `-d, --dir`,
 `-c, --count`, `-n, --dry-run`, `--offline`, `--force`, `--overwrite`, and
 `--sleep` options as AcoustID and MusicBrainz. Directory scans follow library
-symlinks and exclude collection metadata files. The count limits eligible
-track files, not individual ISRC requests.
+symlinks and exclude collection metadata files. Discovered track files are
+collected and processed in random order rather than traversal order. The count
+limits eligible track files, not individual ISRC requests.
 
 Each `trackIdData.streamingData[]` entry is searched using its `isrc`,
 followed by distinct ISRCs in

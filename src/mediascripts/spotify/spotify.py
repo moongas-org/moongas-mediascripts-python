@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import random
 import shlex
 import tempfile
 import time
@@ -425,7 +426,9 @@ def run(
     client = SpotifyClient(client_id, client_secret, sleep)
     succeeded = True
     processed = 0
-    paths = track_files(specific_file, specific_dir)
+    track_paths = list(track_files(specific_file, specific_dir))
+    random.shuffle(track_paths)
+    paths = iter(track_paths)
     while count is None or processed < count:
         path = next(paths, None)
         if path is None:
@@ -463,6 +466,7 @@ def run(
             lookup_succeeded = False
             for entry, isrcs in entries:
                 for isrc, source_isrc in isrcs:
+                    logger.info("[%s] Looking up Spotify track for ISRC %s", path, isrc)
                     try:
                         matches = client.lookup(isrc)
                     except ValueError as error:
