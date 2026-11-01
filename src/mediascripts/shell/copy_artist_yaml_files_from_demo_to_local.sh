@@ -6,7 +6,7 @@ mapfile -t exclude_keywords <<< "$COPY_MEDIALIB_EXCLUDE_KEYWORDS"
 copy-medialib \
   --src-paths "$MOONGAS_COLLECTION_DEMO/data/Music" \
   --dst-path "$MOONGAS_COLLECTION_LOCAL/data/" \
-  --include-filenames artist.yml \
+  --include-filenames album.yml \
   --dir-copy-mode PreserveStructure \
   --overwrite-existing \
   --exclude-keywords "${exclude_keywords[@]}" \

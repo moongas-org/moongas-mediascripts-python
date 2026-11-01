@@ -35,6 +35,37 @@ def test_copy_all(tmp_path: Path):
     copy_medialibs([src_path1, src_path2], dst_path)
 
 
+@pytest.mark.parametrize(
+    ("keywords", "expected_copies", "excluded_count"),
+    [([], 1, 0), ([""], 0, 1), (["album"], 0, 1)],
+)
+def test_copy_medialib_logs_include_and_exclude_decisions(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    keywords: list[str], expected_copies: int, excluded_count: int,
+) -> None:
+    src_path = tmp_path / "src"
+    src_path.mkdir()
+    (src_path / "album.yml").write_text("title: Album\n")
+    (src_path / "song.mp3").write_bytes(b"audio")
+
+    with caplog.at_level(logging.INFO):
+        result = copy_medialib(
+            src_path, tmp_path / "dst", include_filenames=["album.yml"],
+            exclude_keywords=keywords, dry_run=True,
+        )
+
+    assert result.would_be_copied == expected_copies
+    assert result.skipped == 2 - expected_copies
+    assert "include_filenames=['album.yml']" in caplog.text
+    assert f"exclude_keywords={keywords!r}" in caplog.text
+    assert "matched include patterns=1" in caplog.text
+    assert "filename_not_included=1" in caplog.text
+    assert f"excluded_keyword={excluded_count}" in caplog.text
+    if keywords == [""]:
+        assert "excludes every included file" in caplog.text
+        assert "based on exclude keyword ''" in caplog.text
+
+
 def test_copy_medialib_does_not_overwrite_newer_destination(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -49,7 +80,7 @@ def test_copy_medialib_does_not_overwrite_newer_destination(
     os.utime(src_file, (100, 100))
     os.utime(dst_file, (200, 200))
 
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.INFO):
         count = copy_medialib(
             src_path,
             dst_path,
@@ -64,6 +95,8 @@ def test_copy_medialib_does_not_overwrite_newer_destination(
         f"Skipping file '{src_file}' because the destination file '{dst_file}' is newer"
         in caplog.text
     )
+    assert "newer_destination=1" in caplog.text
+    assert "--overwrite-existing does not replace newer files" in caplog.text
 
 
 def test_copy_medialib_overwrites_older_destination(tmp_path: Path) -> None:

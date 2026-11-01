@@ -4,4 +4,5 @@ set -euo pipefail
 ./upload-mediascan-db
 ./upload-covers
 ./update-lyrics
+./update-yaml
 ./restart-remote-services

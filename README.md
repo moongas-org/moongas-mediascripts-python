@@ -333,6 +333,20 @@ track:
   track-yaml-auto-populate
 ```
 
+## Copy Media Library Diagnostics
+
+`copy-medialib` logs its source, destination, filters, and overwrite settings
+at INFO level. After scanning, it reports how many filenames matched the
+include patterns and counts each skip reason. Matching files skipped because
+of exclude keywords, identical content, or destination overwrite rules are
+also logged at INFO; unmatched filenames remain DEBUG-only.
+
+An empty `--exclude-keywords` value matches every source path and excludes
+all included files; the script warns explicitly about this. Check shell
+wrappers that build arguments from `COPY_MEDIALIB_EXCLUDE_KEYWORDS`.
+`--overwrite-existing` still skips newer destination files;
+`--overwrite-newer` permits replacing those files instead.
+
 ## Scan Media Files into Track YAML
 
 Populate or refresh the `mediaFileData` entry in each track YAML file from a

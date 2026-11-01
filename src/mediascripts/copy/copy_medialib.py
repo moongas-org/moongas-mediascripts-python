@@ -119,6 +119,32 @@ def copy_medialib(
     if overwrite_newer:
         overwrite_existing = True
 
+    log.info(
+        "Copy settings: source=%s; destination=%s; include_filenames=%r; "
+        "exclude_keywords=%r; mode=%s; dry_run=%s; overwrite_existing=%s; "
+        "overwrite_newer=%s; make_track_yml=%s; diff=%s",
+        src_path,
+        dst_path,
+        include_filenames,
+        exclude_keywords,
+        dir_copy_mode.name,
+        dry_run,
+        overwrite_existing,
+        overwrite_newer,
+        make_track_yml,
+        diff,
+    )
+    if "" in exclude_keywords:
+        log.warning(
+            "exclude_keywords contains an empty string, which matches every source path "
+            "and excludes every included file. Check COPY_MEDIALIB_EXCLUDE_KEYWORDS "
+            "and the arguments supplied to --exclude-keywords."
+        )
+    if not src_path.is_dir():
+        log.warning(
+            "Source directory does not exist or is not a directory: %s", src_path
+        )
+
     ret = CopyResults(
         would_be_copied=0,
         actually_copied=0,
@@ -141,6 +167,15 @@ def copy_medialib(
     # First pass: build the list of (src, dst) file pairs to copy,
     # applying all skip rules, before copying anything
     copy_list: list[tuple[Path, Path]] = []
+    skip_counts = {
+        "filename_not_included": 0,
+        "excluded_keyword": 0,
+        "identical_destination": 0,
+        "newer_destination": 0,
+        "existing_destination": 0,
+        "converted_destination": 0,
+    }
+    included_count = 0
     scan_progress = tqdm(
         desc=f"Scanning '{src_path}'",
         unit=" files",
@@ -158,17 +193,22 @@ def copy_medialib(
                     f"Skipping file '{src_file_abs_path}' because its filename is not included"
                 )
                 ret = ret._replace(skipped=ret.skipped + 1)
+                skip_counts["filename_not_included"] += 1
                 continue
+            included_count += 1
             # skip files with any exclude keywords anywhere in the file path
             skip = False
             for keyword in exclude_keywords:
                 if str(src_file_abs_path).find(keyword) != -1:
-                    log.debug(
-                        f"Skipping file '{src_file_abs_path}' based on exclude keyword '{keyword}'"
+                    log.info(
+                        "Skipping file '%s' based on exclude keyword %r",
+                        src_file_abs_path,
+                        keyword,
                     )
                     skip = True
             if skip:
                 ret = ret._replace(skipped=ret.skipped + 1)
+                skip_counts["excluded_keyword"] += 1
                 continue
             _, src_ext = os.path.splitext(src_fname)
 
@@ -190,11 +230,12 @@ def copy_medialib(
             if dst_abs_path.exists() and _files_are_identical(
                 src_file_abs_path, dst_abs_path
             ):
-                log.debug(
+                log.info(
                     f"Skipping file '{src_file_abs_path}' because it is identical "
                     f"to destination file '{dst_abs_path}'"
                 )
                 ret = ret._replace(skipped=ret.skipped + 1)
+                skip_counts["identical_destination"] += 1
                 continue
 
             # Never replace a destination file that is newer than the source.
@@ -203,20 +244,28 @@ def copy_medialib(
                 and dst_abs_path.exists()
                 and dst_abs_path.stat().st_mtime > src_file_abs_path.stat().st_mtime
             ):
-                log.debug(
+                log.info(
                     f"Skipping file '{src_file_abs_path}' because the destination file "
                     f"'{dst_abs_path}' is newer"
                 )
                 ret = ret._replace(skipped=ret.skipped + 1)
+                skip_counts["newer_destination"] += 1
+                log.info(
+                    "Source mtime=%s; destination mtime=%s; --overwrite-existing does not "
+                    "replace newer files (use --overwrite-newer to allow this)",
+                    src_file_abs_path.stat().st_mtime,
+                    dst_abs_path.stat().st_mtime,
+                )
                 continue
 
             # Don't copy if it exists unless overwrite_existing==True.
             if not overwrite_existing and dst_abs_path.exists():
-                log.debug(
+                log.info(
                     f"Skipping file '{src_file_abs_path}' because the destination file "
                     f"'{dst_abs_path}' already exists"
                 )
                 ret = ret._replace(skipped=ret.skipped + 1)
+                skip_counts["existing_destination"] += 1
                 continue
 
             # Special case:
@@ -229,16 +278,24 @@ def copy_medialib(
                 dst_fbase, _ = os.path.splitext(dst_abs_path)
                 dst_abs_path_converted = Path(dst_fbase + ".webp")
                 if dst_abs_path_converted.exists():
-                    log.debug(
+                    log.info(
                         f"Skipping file '{src_file_abs_path}' because the converted "
                         f"destination file '{dst_abs_path_converted}' already exists"
                     )
                     ret = ret._replace(skipped=ret.skipped + 1)
+                    skip_counts["converted_destination"] += 1
                     continue
 
             copy_list.append((src_file_abs_path, dst_abs_path))
 
     scan_progress.close()
+    log.info(
+        "Scan summary for '%s': matched include patterns=%d; queued=%d; skip reasons: %s",
+        src_path,
+        included_count,
+        len(copy_list),
+        "; ".join(f"{reason}={count}" for reason, count in skip_counts.items()),
+    )
     log.info(
         f"{len(copy_list)} file(s) to copy from '{src_path}' to '{dst_path}'"
         f"{' (dry run)' if dry_run else ''}"
@@ -266,7 +323,7 @@ def copy_medialib(
 def copy_medialibs(
     src_paths: list[Path],
     dst_root_path: Path,
-    include_filenames: list[str] = ["artist.yml", "cover.jpg"],
+    include_filenames: list[str] = [],
     exclude_keywords: list[str] = [],
     dry_run: bool = False,
     dir_copy_mode: DirCopyMode = DirCopyMode.PreserveStructure,
