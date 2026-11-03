@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mediascripts"
-version = "1.2.7"
+version = "1.2.8"
 requires-python = ">=3.11"
 authors = [{ name = "moongas.org", email = "moongas.org@gmail.com" }]
 maintainers = [{ name = "moongas.org", email = "moongas.org@gmail.com" }]
@@ -74,12 +74,16 @@ list-mediafiles = "mediascripts.mediascan_db.list_mediafiles:main"
 list-tracks = "mediascripts.mediascan_db.list_tracks:main"
 list-trackstreaming = "mediascripts.mediascan_db.list_trackstreaming:main"
 lyrics-text-auto-populate = "mediascripts.lyrics.lyrics_text.lyrics_text_auto_populate:main"
+lyrics-lrc-auto-populate = "mediascripts.lyrics.lyrics_lrc.lyrics_lrc_auto_populate:main"
 list-missing-region-names = "mediascripts.artist.artist_mapgraph.list_missing_region_names:main"
 make-covers-video = "mediascripts.convert.make_covers_video:main"
 
 rename-album-files = "mediascripts.rename.rename_album_files:main"
 
 [project.optional-dependencies]
+lyrics = [
+  "stable-ts>=2.19.1",
+]
 essentia = [
   "essentia",
 ]

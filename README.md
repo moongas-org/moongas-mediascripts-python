@@ -62,8 +62,46 @@ python -m pip install -e ".[dev,llm,stats]"
 - `[dev]` - development dependencies (includes `pytest` and `ruff`)
 - `[stats]` - statistics script dependencies (includes `matplotlib` and `numpy`)
 - `[essentia]` - Essentia audio feature extraction (`pip install -e '.[essentia]'`)
+- `[lyrics]` - local lyrics alignment using `stable-ts` / `stable_whisper` (`pip install -e '.[lyrics]'`)
 
 # Usage
+
+### Generate synchronized LRC lyrics locally
+
+Install `pip install -e '.[lyrics]'` and ensure FFmpeg is on `PATH`. The
+`stable-ts` package provides `stable_whisper` and uses OpenAI Whisper locally;
+no lyrics lookup service or OpenAI API key is used. Model weights may download
+on first use; subsequent runs can use the cached weights offline. Install a
+GPU-enabled PyTorch build separately if needed for your hardware.
+
+```bash
+lyrics-lrc-auto-populate                          # eligible collection album tracks
+lyrics-lrc-auto-populate --file "/path/to/01 - Track.mp3"
+lyrics-lrc-auto-populate --dir "/path/to/album"    # this directory only
+lyrics-lrc-auto-populate --align=false            # list eligible tracks, without loading a model
+lyrics-lrc-auto-populate --dir "/path/to/album" --model medium --language en --device cpu
+python -m mediascripts.lyrics.lyrics_lrc.lyrics_lrc_auto_populate --help
+```
+
+Only existing media tracks with a same-basename UTF-8 `.txt` lyrics file and
+no `.lrc` file are eligible. Text lyrics and existing LRC files are never
+overwritten, even if an LRC appears during alignment. The default target is
+album directories under `$MOONGAS_COLLECTION_ROOTDIR/data` (including library
+symlinks), with the same fallback root as `lyrics-text-auto-populate`.
+`--file` and `--dir` are mutually exclusive.
+
+The model is loaded once per batch (`small` by default); `--model` also accepts
+a local checkpoint path. `--language` defaults to `en` and should match the
+lyrics; `--device` defaults to automatic device selection. Original lyrics
+line breaks are preserved, with one `[mm:ss.xx]` timestamp per aligned line.
+Stable-ts does not provide `to_lrc()`, so the script formats its aligned segment
+start times as LRC. Empty text, failed alignment, and write failures are logged,
+do not leave a partial LRC, and produce a nonzero exit status; other tracks
+continue processing.
+
+`--lookup=false` is an alias for `--align=false`, for compatibility with the
+text-lyrics script's listing mode. Network pacing (`--sleep`) and lookup-cache
+options (`--retry-not-found`) do not apply to local alignment.
 
 ### AcoustID fingerprint lookup
 
@@ -322,6 +360,7 @@ copy:
 dev:
   generate-dataclasses
 lyrics:
+  lyrics-lrc-auto-populate
   lyrics-text-auto-populate
 mediascan_db:
   list-albums
