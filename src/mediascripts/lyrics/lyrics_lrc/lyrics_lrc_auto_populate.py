@@ -201,11 +201,12 @@ def main() -> int:
     parser.add_argument("--model", default="small", help="Whisper model name or checkpoint path (default: small).")
     parser.add_argument("--language", default="en", help="Lyrics language code (default: en).")
     parser.add_argument("--device", help="PyTorch device, e.g. cpu or cuda (default: auto).")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU mode, overriding --device.")
     args = parser.parse_args()
     try:
         return main_loop(
             align_enabled=args.align_enabled, specific_file=args.file, specific_dir=args.dir,
-            model_name=args.model, language=args.language, device=args.device,
+            model_name=args.model, language=args.language, device="cpu" if args.cpu else args.device,
         )
     except KeyboardInterrupt:
         logger.info("Interrupted by user; exiting")

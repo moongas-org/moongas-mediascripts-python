@@ -311,6 +311,35 @@ def test_cli_listing_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, opti
     assert not track.with_suffix(".lrc").exists()
 
 
+@pytest.mark.parametrize(
+    "options,expected_device",
+    [
+        ([], None),
+        (["--device", "cuda"], "cuda"),
+        (["--cpu"], "cpu"),
+        (["--cpu", "--device", "cuda"], "cpu"),
+        (["--device", "cuda", "--cpu"], "cpu"),
+    ],
+)
+def test_cli_cpu_flag_controls_model_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    options: list[str], expected_device: str | None,
+) -> None:
+    track = make_track(tmp_path)
+    devices: list[str | None] = []
+
+    class Whisper:
+        def load_model(self, name: str, *, device: str | None) -> Model:
+            devices.append(device)
+            return Model()
+
+    monkeypatch.setattr(lrc, "import_module", lambda name: Whisper())
+    monkeypatch.setattr(sys, "argv", ["lyrics-lrc-auto-populate", "--file", str(track), *options])
+    assert lrc.main() == 0
+    assert devices == [expected_device]
+    assert track.with_suffix(".lrc").exists()
+
+
 def test_cli_rejects_conflicting_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["lyrics-lrc-auto-populate", "--file", "song.mp3", "--dir", "."])
     with pytest.raises(SystemExit) as exc:

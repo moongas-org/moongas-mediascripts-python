@@ -80,6 +80,7 @@ lyrics-lrc-auto-populate --file "/path/to/01 - Track.mp3"
 lyrics-lrc-auto-populate --file "/path/to/01 - Track.yml"
 lyrics-lrc-auto-populate --dir "/path/to/album"    # this directory only
 lyrics-lrc-auto-populate --align=false            # list eligible tracks, without loading a model
+lyrics-lrc-auto-populate --cpu                    # force CPU mode instead of CUDA
 lyrics-lrc-auto-populate --dir "/path/to/album" --model medium --language en --device cpu
 python -m mediascripts.lyrics.lyrics_lrc.lyrics_lrc_auto_populate --help
 ```
@@ -108,7 +109,8 @@ atomic non-overwriting lyrics writes in `mediascripts.lyrics.lyrics_common`.
 
 The model is loaded once per batch (`small` by default); `--model` also accepts
 a local checkpoint path. `--language` defaults to `en` and should match the
-lyrics; `--device` defaults to automatic device selection. Original lyrics
+lyrics; `--device` defaults to automatic device selection. `--cpu` forces CPU
+mode and overrides `--device` if both are supplied. Original lyrics
 line breaks are preserved, with one `[mm:ss.xx]` timestamp per aligned line.
 Stable-ts does not provide `to_lrc()`, so the script formats its aligned segment
 start times as LRC. Empty text, failed alignment, and write failures are logged,
