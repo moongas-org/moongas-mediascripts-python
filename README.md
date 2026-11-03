@@ -77,6 +77,7 @@ GPU-enabled PyTorch build separately if needed for your hardware.
 ```bash
 lyrics-lrc-auto-populate                          # eligible collection album tracks
 lyrics-lrc-auto-populate --file "/path/to/01 - Track.mp3"
+lyrics-lrc-auto-populate --file "/path/to/01 - Track.yml"
 lyrics-lrc-auto-populate --dir "/path/to/album"    # this directory only
 lyrics-lrc-auto-populate --align=false            # list eligible tracks, without loading a model
 lyrics-lrc-auto-populate --dir "/path/to/album" --model medium --language en --device cpu
@@ -89,6 +90,21 @@ overwritten, even if an LRC appears during alignment. The default target is
 album directories under `$MOONGAS_COLLECTION_ROOTDIR/data` (including library
 symlinks), with the same fallback root as `lyrics-text-auto-populate`.
 `--file` and `--dir` are mutually exclusive.
+
+Both `lyrics-text-auto-populate --file` and `lyrics-lrc-auto-populate --file`
+accept a media file or a track YAML file (`.yml` / `.yaml`). The final extension
+is stripped to identify sibling lyrics files; YAML contents are not parsed.
+For YAML input, a same-basename media file is selected in this preference order:
+`.mp3`, `.m4a`, `.flac`, `.ogg`, `.opus`, `.wav`, `.wma`, `.aac`, then video
+formats `.mp4`, `.webm`, `.mkv`. Extension matching is case-insensitive.
+An explicitly selected media file is used unchanged, preserving embedded-tag and duration
+lookup for text lyrics and supplying the actual audio for LRC alignment.
+Without sibling media, the text script can still look up lyrics using the
+filename and artist/album directories; the LRC script reports an error because
+alignment requires local audio.
+
+Both scripts share media resolution, lyrics paths, logging configuration, and
+atomic non-overwriting lyrics writes in `mediascripts.lyrics.lyrics_common`.
 
 The model is loaded once per batch (`small` by default); `--model` also accepts
 a local checkpoint path. `--language` defaults to `en` and should match the

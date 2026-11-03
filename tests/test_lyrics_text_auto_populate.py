@@ -7,7 +7,101 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
+from mediascripts.lyrics import lyrics_common
 from mediascripts.lyrics.lyrics_text import lyrics_text_auto_populate
+
+
+@pytest.mark.parametrize("suffix", [".mp3", ".yml", ".yaml", ".YML"])
+def test_file_argument_uses_same_track_for_media_or_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str,
+) -> None:
+    track = tmp_path / "01 - Track.live.MP3"
+    track.touch()
+    target = track if suffix == ".mp3" else track.with_suffix(suffix)
+    target.touch()
+    processed: list[Path] = []
+    monkeypatch.setattr(lyrics_text_auto_populate, "load_lookup_cache", lambda: {})
+
+    def process(path: Path) -> str:
+        processed.append(path)
+        path.with_suffix(".txt").write_text("Lyrics\n")
+        return lyrics_text_auto_populate.STATUS_SAVED
+
+    monkeypatch.setattr(lyrics_text_auto_populate, "process_track", process)
+    monkeypatch.setattr(sys, "argv", ["lyrics-text-auto-populate", "--file", str(target)])
+    lyrics_text_auto_populate.main()
+    assert processed == [track]
+    assert target.with_suffix(".txt").read_text() == "Lyrics\n"
+    lyrics_text_auto_populate.main()
+    assert processed == [track]
+
+
+def test_yaml_without_media_uses_filename_metadata_without_parsing_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "Artist" / "Album [2000]" / "01 - Track.yml"
+    target.parent.mkdir(parents=True)
+    target.write_text("YAML contents are not used")
+    info = lyrics_text_auto_populate.TrackInfo("Artist", "Track", "Album", None)
+    assert lyrics_common.resolve_track_file(target) == target
+    assert lyrics_text_auto_populate.read_track_info(target) == info
+    monkeypatch.setattr(lyrics_text_auto_populate, "load_lookup_cache", lambda: {})
+    monkeypatch.setattr(
+        lyrics_text_auto_populate, "lookup_lyrics", lambda actual: {"plainLyrics": "Lyrics"} if actual == info else None,
+    )
+    lyrics_text_auto_populate.main_loop(0, specific_file=target)
+    assert target.with_suffix(".txt").read_text() == "Lyrics\n"
+
+
+def test_yaml_media_resolution_ignores_sidecars_and_other_basenames(tmp_path: Path) -> None:
+    target = tmp_path / "01 - Track.yml"
+    target.touch()
+    for name in ["01 - Track.txt", "01 - Track.lrc", "01 - Track.mp3", "01 - Track.flac", "Other.aac"]:
+        (tmp_path / name).touch()
+    (tmp_path / "01 - Track.aac").mkdir()
+    assert lyrics_common.resolve_track_file(target) == target.with_suffix(".mp3")
+
+
+@pytest.mark.parametrize(
+    "available",
+    [
+        [".mp3", ".m4a", ".flac", ".ogg", ".opus", ".wav", ".wma", ".aac", ".mp4", ".webm", ".mkv"][index:]
+        for index in range(11)
+    ],
+)
+def test_yaml_media_resolution_uses_exact_format_preference(
+    tmp_path: Path, available: list[str],
+) -> None:
+    target = tmp_path / "01 - Track.yml"
+    target.touch()
+    for suffix in reversed(available):
+        target.with_suffix(suffix.upper()).touch()
+    assert lyrics_common.resolve_track_file(target) == target.with_suffix(available[0].upper())
+
+
+def test_explicit_media_selection_is_preserved(tmp_path: Path) -> None:
+    preferred = tmp_path / "Track.mp3"
+    selected = preferred.with_suffix(".mkv")
+    preferred.touch()
+    selected.touch()
+    assert lyrics_common.resolve_track_file(selected) == selected
+
+
+@pytest.mark.parametrize("suffix,exists", [(".txt", True), (".yml", False)])
+def test_invalid_file_argument_does_not_process_tracks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    suffix: str, exists: bool,
+) -> None:
+    target = tmp_path / f"Track{suffix}"
+    if exists:
+        target.touch()
+
+    def unexpected_process(path: Path) -> str:
+        pytest.fail("Invalid file must not be processed")
+
+    monkeypatch.setattr(lyrics_text_auto_populate, "process_track", unexpected_process)
+    lyrics_text_auto_populate.main_loop(0, specific_file=target)
+    assert "Could not select track" in caplog.text
 
 
 def test_main_loop_shuffles_only_pending_lookups(
@@ -305,14 +399,14 @@ def test_process_track_saves_without_replacing_concurrently_created_lyrics(
         return {"id": 123, "plainLyrics": "New lyrics"}
 
     monkeypatch.setattr(lyrics_text_auto_populate, "lookup_lyrics", lookup)
-    real_link = lyrics_text_auto_populate.os.link
+    real_link = lyrics_common.os.link
 
     def link(source: Path, destination: Path) -> None:
         if creation_stage == "save":
             lyrics.write_text("Existing lyrics\n", encoding="utf-8")
         real_link(source, destination)
 
-    monkeypatch.setattr(lyrics_text_auto_populate.os, "link", link)
+    monkeypatch.setattr(lyrics_common.os, "link", link)
 
     status = lyrics_text_auto_populate.process_track(track)
 

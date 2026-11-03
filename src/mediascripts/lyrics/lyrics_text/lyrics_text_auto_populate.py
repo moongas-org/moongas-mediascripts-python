@@ -38,7 +38,9 @@ Command line options:
   --sleep            Initial seconds between LRCLIB requests (default: 0.5).
                      Each HTTP 4xx/5xx response adds 0.5 seconds for the rest of the run.
   --lookup           Enable LRCLIB lookups (default: true). Use --lookup=false to only list missing lyrics files.
-  --file             Specify a single media track file to process. Must be the full path to the file.
+  --file             Specify a media track or track YAML (.yml/.yaml) file.
+                     Lyrics use the same basename. A sibling media file supplies tags
+                     and duration when available; otherwise YAML uses filename/directory metadata.
   --dir              Process media tracks in a single album directory; mutually exclusive with --file.
   --retry-not-found  Query LRCLIB again for tracks previously cached as not found.
   --help             Show this help message and exit.
@@ -67,34 +69,22 @@ from mediascan.types.album.album_path import AlbumPathBuilder
 from tqdm import tqdm
 
 from mediascripts.common.cli.parse_boolean import parse_boolean
+from mediascripts.lyrics.lyrics_common import (
+    MEDIA_EXTENSIONS,
+    MOONGAS_COLLECTION_ROOTDIR,
+    STATUS_ERROR,
+    STATUS_SAVED,
+    STATUS_SKIPPED,
+    TRACK_YAML_EXTENSIONS,
+    configure_logging,
+    lyrics_text_path_for,
+    resolve_track_file,
+    save_lyrics_file,
+)
 
 # Configure with LOG_LEVEL=DEBUG for additional diagnostic detail.
-logging.basicConfig(
-    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+configure_logging()
 logger = logging.getLogger(__name__)
-
-MOONGAS_COLLECTION_ROOTDIR = os.environ.get(
-    "MOONGAS_COLLECTION_ROOTDIR", "../../moongas-collection-demo"
-)
-
-MEDIA_EXTENSIONS = {
-    ".mp3",
-    ".m4a",
-    ".flac",
-    ".ogg",
-    ".opus",
-    ".wav",
-    ".wma",
-    ".aac",
-    ".mp4",
-    ".webm",
-    ".mkv",
-}
-
-LYRICS_TEXT_EXTENSION = ".txt"
 
 # Leading track numbers e.g. "01 - ", "01.01 - ", "01-01- ", "1. ", "03 "
 TRACK_NUMBER_PATTERN = re.compile(r"^\d+(?:[.\-]\d+)?\s*[-.]?\s*")
@@ -123,11 +113,8 @@ LOOKUP_CACHE_PATH = (
     / "moongas"
     / "lyrics_text_lookups.json"
 )
-STATUS_SAVED = "saved"
-STATUS_SKIPPED = "skipped"
 STATUS_INSTRUMENTAL = "instrumental"
 STATUS_NOT_FOUND = "not_found"
-STATUS_ERROR = "error"
 STATUS_RETRY = "retry"
 
 
@@ -137,10 +124,6 @@ class TrackInfo:
     title: str
     album: str
     duration: Optional[int]
-
-
-def lyrics_text_path_for(track_path: Path) -> Path:
-    return track_path.with_suffix(LYRICS_TEXT_EXTENSION)
 
 
 def track_title_from_filename(track_path: Path) -> str:
@@ -162,6 +145,8 @@ def read_track_info(track_path: Path) -> TrackInfo:
         album=re.sub(r"\s*\[[^\]]*\]\s*$", "", album_path.album_dirname),
         duration=None,
     )
+    if track_path.suffix.lower() in TRACK_YAML_EXTENSIONS:
+        return info
     try:
         media = mutagen.File(track_path, easy=True)
     except mutagen.MutagenError as e:
@@ -323,8 +308,6 @@ def process_track(track_path: Path) -> str:
     if lyrics_path.exists():
         logger.info("[%s] Lyrics text file already exists; skipping lookup", filename)
         return STATUS_SKIPPED
-    temporary_path: Path | None = None
-
     info = read_track_info(track_path)
     logger.info(
         "[%s] Looking up artist=%r title=%r album=%r duration=%s",
@@ -352,19 +335,8 @@ def process_track(track_path: Path) -> str:
 
         logger.debug("[%s] Lyrics found:\n%s", filename, content)
 
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=track_path.parent,
-            prefix=f".{lyrics_path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_file.write(content + "\n")
-            temporary_path = Path(temporary_file.name)
-
         try:
-            os.link(temporary_path, lyrics_path)
+            save_lyrics_file(lyrics_path, content + "\n")
         except FileExistsError:
             logger.info(
                 "[%s] Lyrics text file appeared meanwhile; not overwriting", filename
@@ -395,9 +367,6 @@ def process_track(track_path: Path) -> str:
             return STATUS_RETRY
         else:
             logger.exception("[%s] Failed (%s): %s", filename, type(e).__name__, e)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
     return STATUS_ERROR
 
 
@@ -415,11 +384,10 @@ def main_loop(
     logger.info("Collection data directory: %s", collection_data_path.resolve())
 
     if specific_file is not None:
-        if not specific_file.is_file():
-            logger.error("Specified file does not exist: %s", specific_file)
-            return
-        if specific_file.suffix.lower() not in MEDIA_EXTENSIONS:
-            logger.error("Specified file is not a media track: %s", specific_file)
+        try:
+            specific_file = resolve_track_file(specific_file)
+        except (OSError, ValueError) as error:
+            logger.error("Could not select track: %s", error)
             return
         tracks = [] if lyrics_text_path_for(specific_file).exists() else [specific_file]
         # Explicitly requested files are always looked up
@@ -531,7 +499,7 @@ def main():
         "--file",
         type=Path,
         default=None,
-        help="Process a single specific media track file instead of scanning all album directories.",
+        help="Process a media track or same-basename track YAML (.yml/.yaml) file instead of scanning all albums.",
     )
     target_group.add_argument(
         "--dir",

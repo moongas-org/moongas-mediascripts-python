@@ -2,6 +2,7 @@
 
 Run lyrics-lrc-auto-populate with --file, --dir, or no target for collection album
 directories under $MOONGAS_COLLECTION_ROOTDIR/data. --dir is non-recursive.
+--file accepts media or a track YAML (.yml/.yaml) with same-basename sibling media.
 Use --align=false (or --lookup=false) to list eligible tracks without loading
 Whisper. Install the optional [lyrics] dependencies and FFmpeg for alignment.
 Model weights may be downloaded on first use; alignment itself runs locally.
@@ -10,8 +11,6 @@ Model weights may be downloaded on first use; alignment itself runs locally.
 import argparse
 import logging
 import math
-import os
-import tempfile
 from collections import Counter
 from collections.abc import Sequence
 from importlib import import_module
@@ -21,19 +20,22 @@ from typing import Protocol, cast
 from tqdm import tqdm
 
 from mediascripts.common.cli.parse_boolean import parse_boolean
-from mediascripts.lyrics.lyrics_text.lyrics_text_auto_populate import (
+from mediascripts.lyrics.lyrics_common import (
     MEDIA_EXTENSIONS,
+    MOONGAS_COLLECTION_ROOTDIR,
+    STATUS_ERROR,
+    STATUS_SAVED,
+    STATUS_SKIPPED,
+    configure_logging,
+    lyrics_lrc_path_for,
     lyrics_text_path_for,
+    resolve_track_file,
+    save_lyrics_file,
 )
 from mediascripts.track.track_yaml.track_yaml_common import iter_collection_files
 
+configure_logging()
 logger = logging.getLogger(__name__)
-MOONGAS_COLLECTION_ROOTDIR = os.environ.get(
-    "MOONGAS_COLLECTION_ROOTDIR", "../../moongas-collection-demo"
-)
-STATUS_SAVED = "saved"
-STATUS_SKIPPED = "skipped"
-STATUS_ERROR = "error"
 
 
 class AlignedSegment(Protocol):
@@ -57,10 +59,6 @@ class AlignmentModel(Protocol):
 
 class StableWhisper(Protocol):
     def load_model(self, name: str, *, device: str | None) -> AlignmentModel: ...
-
-
-def lyrics_lrc_path_for(track_path: Path) -> Path:
-    return track_path.with_suffix(".lrc")
 
 
 def is_eligible(track_path: Path) -> bool:
@@ -107,7 +105,6 @@ def process_track(track_path: Path, model: AlignmentModel, language: str = "en")
     if not is_eligible(track_path):
         logger.info("[%s] No longer eligible; skipping", track_path)
         return STATUS_SKIPPED
-    temporary_path: Path | None = None
     lrc_path = lyrics_lrc_path_for(track_path)
     try:
         text = lyrics_text_path_for(track_path).read_text(encoding="utf-8-sig").strip()
@@ -118,14 +115,8 @@ def process_track(track_path: Path, model: AlignmentModel, language: str = "en")
         if result is None:
             raise ValueError("Alignment failed to produce a result")
         content = format_lrc(result)
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=track_path.parent,
-            prefix=f".{lrc_path.name}.", suffix=".tmp", delete=False,
-        ) as stream:
-            temporary_path = Path(stream.name)
-            stream.write(content)
         try:
-            os.link(temporary_path, lrc_path)
+            save_lyrics_file(lrc_path, content)
         except FileExistsError:
             logger.info("[%s] LRC file appeared meanwhile; not overwriting", track_path)
             return STATUS_SKIPPED
@@ -134,9 +125,6 @@ def process_track(track_path: Path, model: AlignmentModel, language: str = "en")
     except (OSError, UnicodeError, ValueError, RuntimeError, TypeError):
         logger.exception("[%s] Failed to generate LRC lyrics", track_path)
         return STATUS_ERROR
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
 
 
 def main_loop(
@@ -148,8 +136,13 @@ def main_loop(
     device: str | None = None,
 ) -> int:
     if specific_file is not None:
-        if not specific_file.is_file() or specific_file.suffix.lower() not in MEDIA_EXTENSIONS:
-            logger.error("Specified file is not an existing media track: %s", specific_file)
+        try:
+            specific_file = resolve_track_file(specific_file)
+        except (OSError, ValueError) as error:
+            logger.error("Could not select track: %s", error)
+            return 1
+        if specific_file.suffix.lower() not in MEDIA_EXTENSIONS:
+            logger.error("No same-basename media file beside track YAML: %s", specific_file)
             return 1
         tracks = [specific_file] if is_eligible(specific_file) else []
     else:
@@ -197,7 +190,9 @@ def main() -> int:
         description="Populate missing LRC files by aligning existing text lyrics to local media using stable-ts."
     )
     targets = parser.add_mutually_exclusive_group()
-    targets.add_argument("--file", type=Path, help="Process one media track.")
+    targets.add_argument(
+        "--file", type=Path, help="Process one media track or same-basename track YAML (.yml/.yaml) file.",
+    )
     targets.add_argument("--dir", type=Path, help="Process media tracks directly in this album directory.")
     parser.add_argument(
         "--align", "--lookup", dest="align_enabled", type=parse_boolean, default=True,

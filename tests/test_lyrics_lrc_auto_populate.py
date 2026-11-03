@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from mediascripts.lyrics import lyrics_common
 from mediascripts.lyrics.lyrics_lrc import lyrics_lrc_auto_populate as lrc
 
 
@@ -36,6 +37,75 @@ def make_track(directory: Path, name: str = "01 - Track.mp3", text: str = "First
     track.touch()
     track.with_suffix(".txt").write_text(text, encoding="utf-8")
     return track
+
+
+@pytest.mark.parametrize("suffix", [".mp3", ".yml", ".yaml", ".YAML"])
+def test_file_argument_aligns_media_for_media_or_yaml_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str,
+) -> None:
+    track = make_track(tmp_path, "01 - Track.live.mp3")
+    target = track.with_suffix(suffix)
+    if target != track:
+        target.write_text("YAML contents are not used")
+    model = Model()
+
+    class Whisper:
+        def load_model(self, name: str, *, device: str | None) -> Model:
+            return model
+
+    monkeypatch.setattr(lrc, "import_module", lambda name: Whisper())
+    monkeypatch.setattr(sys, "argv", ["lyrics-lrc-auto-populate", "--file", str(target)])
+    assert lrc.main() == 0
+    assert model.calls == [(str(track), "First line\nSecond line", "en", True)]
+    assert target.with_suffix(".lrc").read_text() == "[00:01.24]First line\n[01:01.50]Second line\n"
+    assert lrc.main() == 0
+    assert len(model.calls) == 1
+
+
+def test_yaml_without_media_reports_error_before_loading_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    target = tmp_path / "Track.yml"
+    target.touch()
+    target.with_suffix(".txt").write_text("Lyrics")
+
+    def unexpected_import(name: str) -> None:
+        pytest.fail("Missing media must be reported before loading Whisper")
+
+    monkeypatch.setattr(lrc, "import_module", unexpected_import)
+    assert lrc.main_loop(specific_file=target) == 1
+    assert "No same-basename media file" in caplog.text
+    assert not target.with_suffix(".lrc").exists()
+
+
+@pytest.mark.parametrize(
+    "available",
+    [
+        [".mp3", ".m4a", ".flac", ".mkv"],
+        [".m4a", ".flac", ".mp4"],
+        [".aac", ".mp4", ".webm"],
+        [".mp4", ".webm", ".mkv"],
+        [".webm", ".mkv"],
+        [".mkv"],
+    ],
+)
+def test_yaml_alignment_uses_preferred_available_media(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available: list[str],
+) -> None:
+    target = tmp_path / "Track.yml"
+    target.touch()
+    for suffix in reversed(available):
+        make_track(tmp_path, f"Track{suffix}")
+    model = Model()
+
+    class Whisper:
+        def load_model(self, name: str, *, device: str | None) -> Model:
+            return model
+
+    monkeypatch.setattr(lrc, "import_module", lambda name: Whisper())
+    assert lrc.main_loop(specific_file=target) == 0
+    assert [call[0] for call in model.calls] == [str(target.with_suffix(available[0]))]
+    assert target.with_suffix(".lrc").exists()
 
 
 def test_directory_selection_requires_media_text_and_missing_lrc(tmp_path: Path) -> None:
@@ -134,7 +204,7 @@ def test_failed_tracks_log_errors_and_leave_no_lrc(
     if failure == "write":
         def fail_link(source: Path, target: Path) -> None:
             raise OSError("Disk failure")
-        monkeypatch.setattr(lrc.os, "link", fail_link)
+        monkeypatch.setattr(lyrics_common.os, "link", fail_link)
     assert lrc.process_track(track, FailingModel()) == lrc.STATUS_ERROR
     assert "Failed to generate LRC lyrics" in caplog.text
     assert not track.with_suffix(".lrc").exists()
@@ -225,7 +295,7 @@ def test_invalid_targets_return_failure(
     if target == "missing-dir":
         result = lrc.main_loop(specific_dir=tmp_path / "missing")
     else:
-        path = tmp_path / ("missing.mp3" if target == "missing-file" else "metadata.yml")
+        path = tmp_path / ("missing.mp3" if target == "missing-file" else "metadata.json")
         if target == "unsupported-file":
             path.touch()
         result = lrc.main_loop(specific_file=path)
