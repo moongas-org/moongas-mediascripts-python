@@ -95,7 +95,7 @@ def format_lrc(result: AlignmentResult) -> str:
         centiseconds = round(start * 100)
         minutes, remainder = divmod(centiseconds, 6000)
         seconds, fraction = divmod(remainder, 100)
-        lines.append(f"[{minutes:02d}:{seconds:02d}.{fraction:02d}]{text}")
+        lines.append(f"[{minutes:02d}:{seconds:02d}.{fraction:02d}] {text}")
     if not lines:
         raise ValueError("Alignment returned no timed lyrics")
     return "\n".join(lines) + "\n"

@@ -57,7 +57,7 @@ def test_file_argument_aligns_media_for_media_or_yaml_input(
     monkeypatch.setattr(sys, "argv", ["lyrics-lrc-auto-populate", "--file", str(target)])
     assert lrc.main() == 0
     assert model.calls == [(str(track), "First line\nSecond line", "en", True)]
-    assert target.with_suffix(".lrc").read_text() == "[00:01.24]First line\n[01:01.50]Second line\n"
+    assert target.with_suffix(".lrc").read_text() == "[00:01.24] First line\n[01:01.50] Second line\n"
     assert lrc.main() == 0
     assert len(model.calls) == 1
 
@@ -144,7 +144,7 @@ def test_process_aligns_exact_existing_text_and_exports_lrc(tmp_path: Path) -> N
     assert lrc.process_track(track, model, language="fr") == lrc.STATUS_SAVED
     assert model.calls == [(str(track), "First line\nSecond line", "fr", True)]
     assert track.with_suffix(".lrc").read_text() == (
-        "[00:01.24]First line\n[01:01.50]Second line\n"
+        "[00:01.24] First line\n[01:01.50] Second line\n"
     )
     assert track.with_suffix(".txt").read_text(encoding="utf-8") == "\ufeffFirst line\nSecond line\n"
     assert not list(tmp_path.glob(".*.tmp"))
@@ -212,7 +212,7 @@ def test_failed_tracks_log_errors_and_leave_no_lrc(
 
 
 def test_lrc_timestamp_rounding_carries_into_next_minute() -> None:
-    assert lrc.format_lrc(Result([Segment(59.999, "line")])) == "[01:00.00]line\n"
+    assert lrc.format_lrc(Result([Segment(59.999, "line")])) == "[01:00.00] line\n"
 
 
 @pytest.mark.parametrize(
