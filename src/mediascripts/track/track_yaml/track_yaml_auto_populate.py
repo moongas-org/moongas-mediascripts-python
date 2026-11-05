@@ -3,7 +3,6 @@
 import argparse
 import logging
 import os
-import random
 import shlex
 import tempfile
 import time
@@ -26,6 +25,7 @@ from tqdm import tqdm
 from yaml.error import YAMLError as PyYAMLError
 
 from mediascripts.common.cli.parse_boolean import parse_boolean
+from mediascripts.common.files import shuffled_files
 from mediascripts.common.openai.client import MODEL_NAME, get_client
 from mediascripts.track.track_yaml.track_yaml_common import (
     TextWriter,
@@ -340,7 +340,7 @@ def main_loop(
             "LLM lookup disabled; %d pending file(s), no files changed", len(pending)
         )
         return True
-    random.shuffle(pending)
+    pending = shuffled_files(pending)
     if count is not None:
         pending = pending[:count]
         logger.info(

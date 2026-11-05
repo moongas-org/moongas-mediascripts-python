@@ -107,6 +107,10 @@ alignment requires local audio.
 Both scripts share media resolution, lyrics paths, logging configuration, and
 atomic non-overwriting lyrics writes in `mediascripts.lyrics.lyrics_common`.
 
+Eligible tracks are processed once per run in random order, using the same
+shared file-shuffling helper as track YAML auto-population. Listing mode
+(`--align=false`) keeps sorted order, and `--file` still selects only one track.
+
 The model is loaded once per batch (`small` by default); `--model` also accepts
 a local checkpoint path. `--language` defaults to `en` and should match the
 lyrics; `--device` defaults to automatic device selection. `--cpu` forces CPU

@@ -10,6 +10,7 @@ from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
 from mediascan.types.track import track_yaml_file_validator as validator
 from openai import APIConnectionError, APIStatusError, OpenAI
 
+from mediascripts.common import files
 from mediascripts.track.track_yaml import track_yaml_auto_populate as populate
 
 CORE = "trackData:\n  title: Track\n  artist: Artist\n  albumartist: Artist\n  album: Album\n  genre: Rock\n  year: 1995\n"
@@ -495,13 +496,36 @@ def test_collection_skip_force_reference_examples_and_pacing(
     def keep_order(paths: list[Path]) -> None:
         return None
 
-    monkeypatch.setattr(populate.random, "shuffle", keep_order)
+    monkeypatch.setattr(files.random, "shuffle", keep_order)
     sleeps: list[float] = []
     monkeypatch.setattr(populate.time, "sleep", sleeps.append)
     assert populate.main_loop(7, force=force)
     assert client.chat.completions.create.call_count == (3 if force else 2)
     assert sleeps == [7] * (2 if force else 1)
     assert COMPLETE in client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+
+
+def test_batch_shuffles_pending_files_before_applying_count(
+    track: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    complete = track.with_name("02 - Complete.yml")
+    complete.write_text(COMPLETE)
+    last = track.with_name("03 - Missing.yml")
+    last.write_text(CORE)
+    shuffled: list[list[Path]] = []
+
+    def reverse_order(paths: list[Path]) -> None:
+        shuffled.append(paths.copy())
+        paths.reverse()
+
+    process = MagicMock(return_value=True)
+    monkeypatch.setattr(files.random, "shuffle", reverse_order)
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, make_client(COMPLETE)))
+    monkeypatch.setattr(populate, "process_track_yaml_file", process)
+    assert populate.main_loop(0, specific_dir=track.parent, count=1)
+    assert shuffled == [[track, last]]
+    assert process.call_count == 1
+    assert process.call_args.args[0] == last
 
 
 @pytest.mark.parametrize("llm_enabled", [False, True])

@@ -20,6 +20,7 @@ from typing import Protocol, cast
 from tqdm import tqdm
 
 from mediascripts.common.cli.parse_boolean import parse_boolean
+from mediascripts.common.files import shuffled_files
 from mediascripts.lyrics.lyrics_common import (
     MEDIA_EXTENSIONS,
     MOONGAS_COLLECTION_ROOTDIR,
@@ -175,6 +176,7 @@ def main_loop(
         logger.exception("Could not load Whisper model %s", model_name)
         return 1
 
+    tracks = shuffled_files(tracks)
     statuses: Counter[str] = Counter()
     for track in tqdm(tracks, desc="Aligning lyrics", unit="track"):
         statuses[process_track(track, model, language)] += 1

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from mediascripts.common import files
 from mediascripts.lyrics import lyrics_common
 from mediascripts.lyrics.lyrics_lrc import lyrics_lrc_auto_populate as lrc
 
@@ -148,6 +149,51 @@ def test_process_aligns_exact_existing_text_and_exports_lrc(tmp_path: Path) -> N
     )
     assert track.with_suffix(".txt").read_text(encoding="utf-8") == "\ufeffFirst line\nSecond line\n"
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("collection", [False, True])
+def test_batch_processes_eligible_tracks_in_shuffled_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collection: bool,
+) -> None:
+    album = tmp_path / "data" / "Music" / "Artist" / "Album [2000]"
+    first = make_track(album, "01 - First.mp3")
+    second = make_track(album, "02 - Second.mp3")
+    existing = make_track(album, "03 - Existing.mp3")
+    existing.with_suffix(".lrc").write_text("existing")
+    model = Model()
+    shuffled: list[list[Path]] = []
+
+    def reverse_order(paths: list[Path]) -> None:
+        shuffled.append(paths.copy())
+        paths.reverse()
+
+    class Whisper:
+        def load_model(self, name: str, *, device: str | None) -> Model:
+            return model
+
+    monkeypatch.setattr(lrc, "MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    monkeypatch.setattr(lrc, "import_module", lambda name: Whisper())
+    monkeypatch.setattr(files.random, "shuffle", reverse_order)
+    assert lrc.main_loop(specific_dir=None if collection else album) == 0
+    assert shuffled == [[first, second]]
+    assert [call[0] for call in model.calls] == [str(second), str(first)]
+    assert existing.with_suffix(".lrc").read_text() == "existing"
+
+
+def test_listing_keeps_sorted_order_without_shuffling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    second = make_track(tmp_path, "02 - Second.mp3")
+    first = make_track(tmp_path, "01 - First.mp3")
+
+    def unexpected_shuffle(paths: list[Path]) -> None:
+        pytest.fail("Listing must not shuffle tracks")
+
+    monkeypatch.setattr(files.random, "shuffle", unexpected_shuffle)
+    with caplog.at_level(logging.INFO):
+        assert lrc.main_loop(align_enabled=False, specific_dir=tmp_path) == 0
+    missing = [record.getMessage() for record in caplog.records if record.getMessage().startswith("Missing:")]
+    assert missing == [f"Missing: {first.with_suffix('.lrc')}", f"Missing: {second.with_suffix('.lrc')}"]
 
 
 @pytest.mark.parametrize("reason", ["existing", "no-text", "no-media", "broken-link"])
