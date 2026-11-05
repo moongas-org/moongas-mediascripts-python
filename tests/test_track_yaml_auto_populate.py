@@ -101,8 +101,8 @@ def test_existing_media_file_data_is_preserved_when_adding_service_id(track: Pat
     response = original + COMPLETE.removeprefix(CORE)
     assert populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(response)))
     loaded = load_track_yaml_file(track)
-    assert loaded.media_file_data is not None
-    fingerprint = loaded.media_file_data[0].fpcalc_data
+    assert loaded.mediafile_data is not None
+    fingerprint = loaded.mediafile_data[0].fpcalc_data
     assert fingerprint is not None
     assert fingerprint.duration == 123.5
     assert fingerprint.fingerprint == "AQAA-example-fingerprint"

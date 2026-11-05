@@ -197,8 +197,8 @@ def test_saved_result_loads_with_mediascan_schema(track: Path, http_mock: MagicM
 
     assert musicbrainz.run(specific_file=track)
     loaded = load_track_yaml_file(track)
-    assert loaded.media_file_data is not None
-    data = loaded.media_file_data[0].acoustid_data
+    assert loaded.mediafile_data is not None
+    data = loaded.mediafile_data[0].acoustid_data
     assert data is not None
     recording = data.results[0].recordings[0]
     assert (recording.id, recording.title, recording.length) == (REC_1, "Walking on Broken Glass", 252000)
@@ -220,8 +220,8 @@ def test_acoustid_then_musicbrainz_loads_with_mediascan_schema(
     assert acoustid.run("key", specific_file=path)
     assert musicbrainz.run(specific_file=path)
     loaded = load_track_yaml_file(path)
-    assert loaded.media_file_data is not None
-    data = loaded.media_file_data[0].acoustid_data
+    assert loaded.mediafile_data is not None
+    data = loaded.mediafile_data[0].acoustid_data
     assert data is not None
     assert data.results[0].recordings[0].title == "Walking on Broken Glass"
 
@@ -642,8 +642,8 @@ def test_acoustid_output_loads_before_musicbrainz(track: Path) -> None:
     from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
 
     loaded = load_track_yaml_file(track)
-    assert loaded.media_file_data is not None
-    data = loaded.media_file_data[0].acoustid_data
+    assert loaded.mediafile_data is not None
+    data = loaded.mediafile_data[0].acoustid_data
     assert data is not None
     recording = data.results[0].recordings[1]
     assert (recording.id, recording.title, recording.isrcs) == (REC_2, None, None)

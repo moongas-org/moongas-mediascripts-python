@@ -46,29 +46,29 @@ graph TD;
 # Quick Start
 
 ```bash
-pip install "git+https://github.com/moongas-org/moongas-mediascripts-python.git[stats]"
+uv tool install "mediascripts[stats] @ git+https://github.com/moongas-org/moongas-mediascripts-python.git"
 ```
 
 ### (Developer) Clone GitHub repo and install (editable)
 
 ```bash
-git clone git@github.com:moongas-org/moongas-mediascan-python.git
-cd moongas-mediascan-python
-python -m pip install -e ".[dev,llm,stats]"
+git clone git@github.com:moongas-org/moongas-mediascripts-python.git
+cd moongas-mediascripts-python
+uv sync --extra dev --extra llm --extra stats
 ```
 
 ### Optional dependency groups
 
 - `[dev]` - development dependencies (includes `pytest` and `ruff`)
 - `[stats]` - statistics script dependencies (includes `matplotlib` and `numpy`)
-- `[essentia]` - Essentia audio feature extraction (`pip install -e '.[essentia]'`)
-- `[lyrics]` - local lyrics alignment using `stable-ts` / `stable_whisper` (`pip install -e '.[lyrics]'`)
+- `[essentia]` - Essentia audio feature extraction (`uv sync --extra essentia`)
+- `[lyrics]` - local lyrics alignment using `stable-ts` / `stable_whisper` (`uv sync --extra lyrics`)
 
 # Usage
 
 ### Generate synchronized LRC lyrics locally
 
-Install `pip install -e '.[lyrics]'` and ensure FFmpeg is on `PATH`. The
+Run `uv sync --extra lyrics` and ensure FFmpeg is on `PATH`. The
 `stable-ts` package provides `stable_whisper` and uses OpenAI Whisper locally;
 no lyrics lookup service or OpenAI API key is used. Model weights may download
 on first use; subsequent runs can use the cached weights offline. Install a
@@ -340,8 +340,8 @@ and existing references are expanded without losing their identifiers.
 The current source targets `mediascan` 1.2.5 or newer: metadata types and YAML
 helpers under `mediascan.types`, and database
 loading under `mediascan.utils.db.mediascan_db_loader`. When developing against
-that sibling checkout, install its current source into the same environment
-(`pip install -e ../moongas-mediascan-python`); an older installed wheel may
+that sibling checkout, install its current source into the project environment
+(`uv pip install --python .venv/bin/python --editable ../moongas-mediascan-python`); an older installed wheel may
 still use the previous module layout.
 
 The `mediascripts` package installs a console script named `mediascripts` so it can be executed either with `python -m mediascripts` or simply with `mediascripts`.
@@ -444,7 +444,7 @@ The track YAML commands share collection scanning, atomic file writes, and
 field-diff formatting through
 [`track_yaml_common.py`](./src/mediascripts/track/track_yaml/track_yaml_common.py).
 
-Install the LLM extras (`pip install -e '.[llm]'`) and configure an
+Install the LLM extras (`uv sync --extra llm`) and configure an
 OpenAI-compatible provider using `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
 The existing `GITHUB_MODELS_BASE_URL`, `GITHUB_TOKEN`, and `GITHUB_MODEL`
 fallbacks are also supported, as for artist YAML auto-population.

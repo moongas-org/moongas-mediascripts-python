@@ -50,6 +50,10 @@ dependencies = [
   "tqdm>=4.67.0",
 ]
 
+[tool.uv.sources]
+mediascan = { git = "https://github.com/moongas-org/moongas-mediascan-python", branch = "main" }
+mediatest = { git = "https://github.com/moongas-org/moongas-mediatest-python-pytest", branch = "main" }
+
 [project.scripts]
 mediascripts = "mediascripts.__main__:main"
 acoustid = "mediascripts.acoustid.acoustid:main"
@@ -88,6 +92,7 @@ essentia = [
   "essentia",
 ]
 dev = [
+  "pandas-stubs",
   "ruff>=0.1.0",
   "pytest>=9.1.1",
   "types-requests>=2.32.0",
