@@ -12,7 +12,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # [as MOONGAS_USER] Run the following commands as the target Moongas user.
-sudo -u "$MOONGAS_USER" bash -c '
+# -i  Start the shell as a login shell for the target user, ensuring their environment is loaded.
+sudo -i -u "$MOONGAS_USER" bash -c '
 ./scan-to-track-yaml
 ./scan-to-db
 ./upload-mediascan-db
@@ -24,3 +25,4 @@ sudo -u "$MOONGAS_USER" bash -c '
 
 # [as root] Restart local services after updating everything locally.
 ./restart-local-services
+
