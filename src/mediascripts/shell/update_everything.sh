@@ -3,6 +3,9 @@
 # If MOONGAS_USER is unset or empty, the script exits immediately with an error
 : "${MOONGAS_USER?Error: MOONGAS_USER environment variable is not set.}"
 : "${MOONGAS_COLLECTION_ROOTDIR?Error: MOONGAS_COLLECTION_ROOTDIR environment variable is not set.}"
+: "${MOONGAS_REMOTE_SERVER_IP?Error: MOONGAS_REMOTE_SERVER_IP environment variable is not set.}"
+: "${MOONGAS_REMOTE_MEDIA_ROOTDIR?Error: MOONGAS_REMOTE_MEDIA_ROOTDIR environment variable is not set.}"
+
 
 # Updates everything and uploads to the active remote Moongas server
 set -euo pipefail
