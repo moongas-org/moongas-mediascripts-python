@@ -66,6 +66,109 @@ uv sync --extra dev --extra llm --extra stats
 
 # Usage
 
+### Populate one artist directory
+
+```bash
+artist-yaml-auto-populate --dir "/music/Artist"
+artist-yaml-auto-populate --dir "/music/Artist" --artist "Artist" --artist "Alias" \
+  --city "London" --country-code GB --region-code GB-LND --language-code en
+artist-yaml-auto-populate --dir "/music/Artist" --llm=false
+```
+
+`--dir` and `--file` are mutually exclusive. If `artist.yml` is missing,
+`--dir` creates a minimal `artistData` document. Artist names come from explicit
+`--artist` values first, then track YAML in immediate album subdirectories,
+then media tags in those same directories. Album artist is preferred over
+track artist; conflicting names use the most frequent value, with sorted
+file order breaking ties and a warning describing the decision. As a last
+resort, the artist directory name is used (`_` becomes `.`).
+
+`--artist` and `--language-code` are repeatable. These and `--city`,
+`--country-code`, and `--region-code` seed new files only and require `--dir`.
+Unknown location/language values stay empty rather than being guessed from
+track metadata. Unreadable local clues are warned about and skipped.
+Existing artist YAML files are never overwritten by the seeding step.
+
+After creation, the selected file enters the existing LLM enrichment flow,
+even when outside the configured collection. Newly created files bypass the
+already-valid skip once; existing files retain normal validation/`--force`
+behavior. `--llm=false` creates a missing file using local clues only, without
+calling the model. Default collection-wide behavior is unchanged.
+
+### Tag a media file
+
+```bash
+auto-tag-media-file --file "/music/Artist/Album [2024]/05 - BIG 5.mp3" -n
+auto-tag-media-file --file "/music/Artist/Album [2024]/05 - BIG 5.mp3"
+auto-tag-media-file --file track.flac --artist "Artist" --album-artist "Artist" \
+  --album "Album" --title "Title" --genre "Hip-Hop" --year 2024 --cover cover.jpg
+python -m mediascripts.mediafile.auto_tag_media_file --help
+```
+
+Explicit arguments override same-basename `.yml` / `.yaml` `trackData` values
+(`track_data` is also accepted). Missing or empty YAML values fall back to the
+artist directory, album directory, bracketed album year, and filename without
+its leading track number. The artist directory supplies both artist and album
+artist unless overridden. Existing differing text tags are updated; unrelated
+tags and artwork are preserved. No genre is guessed. `--genre` matches mediascan
+`Genre` enum values case-insensitively, ignoring hyphens, and writes the enum's
+canonical spelling (for example, `--genre jazz` writes `Jazz`, and
+`--genre synthpop` writes `Synth-pop`); invalid CLI values log
+an error and exit before reading or modifying the media file, even in dry-run.
+An invalid YAML genre causes the genre field to be cleared with a warning,
+unless overridden by a valid CLI genre. Without a CLI/YAML genre,
+existing file genres are checked; if any value is invalid the whole genre
+field is cleared. Dry-run warns and proposes clearing without saving.
+Other invalid metadata is reported, not silently ignored.
+
+When the filename begins with a number from 1 through 99, that number sets the
+track-number tag: both `05 - BIG 5.mp3` and `5 BIG 5.mp3` yield track 5.
+Use `--track 7` to set the track number explicitly, overriding the filename,
+and `--disc 1` to set the disc number. Both accept `number` or `number/total`,
+with positions from 1 through 99 and optional totals from 1 through 65535.
+Explicit options replace the whole field: `--track 1 --disc ""` sets track
+1 without a total and removes the disc field, while `--track "1/10" --disc "1/2"`
+sets both positions and totals. An empty string clears either field; omitting
+`--disc` preserves existing disc metadata.
+Filename-inferred track numbers preserve existing totals. Missing
+or out-of-range prefixes leave existing track numbers unchanged; out-of-range
+prefixes are logged as warnings. Track-number changes also respect dry-run.
+
+Use `--comment "Notes"`, `--composer "Composer"`, and `--copyright "Copyright"`
+to set these optional tags. Omitted options preserve existing values; an
+explicit empty string (for example, `--comment ""`) removes the field.
+Setting or clearing an ID3 comment replaces/removes all comment frames,
+including comments with different descriptions or languages. Other formats
+use their native equivalent tags. These options also respect dry-run.
+
+Path reconstruction is best-effort: `_` becomes `.` to reverse the main
+replacement in the album-file renamer. Its other transformations are lossy:
+an underscore could originally have been a dollar sign or asterisk, and
+`and` could have been `&`. These cannot be reliably recovered; use YAML or
+explicit arguments for exact spelling. YAML and argument values are not
+unescaped.
+
+Missing artwork is filled from a sibling `cover.jpg` or `cover.webp`,
+preferring JPEG over WebP and the largest file within that preference
+(including case variants). `--cover` selects a specific JPEG, PNG, or WebP
+instead, but never replaces existing artwork. WebP is converted in memory to
+JPEG for MP4/M4A embedding; the source image is not changed.
+
+MP3 and WAV use ID3; FLAC, Ogg/Opus, MP4/M4A, and WMA use their native metadata.
+Recognized extensions that Mutagen cannot write (such as raw AAC, MKV, and
+WebM) report an error rather than inserting incompatible ID3 data. All changes
+are logged after a successful save. `-n` / `--dry-run` validates and logs the
+same proposed changes without writing either the media file or YAML.
+Every successful run prints the final artist, album artist, album, title,
+genre, year, track number, disc number, comment, composer, copyright, and
+cover-art presence, including unset fields. Values are read back from the file;
+dry-run shows proposed in-memory values clearly labeled as unsaved.
+With `-v` / `--verbose`, successful runs additionally print all tags from the media
+file, including unchanged tags, plus FLAC picture summaries. Verbose dry-run
+instead prints the proposed in-memory tags, clearly labeled as unsaved.
+Binary artwork is summarized rather
+than dumped as raw bytes where supported by Mutagen's tag formatter.
+
 ### Generate synchronized LRC lyrics locally
 
 Run `uv sync --extra lyrics` and ensure FFmpeg is on `PATH`. The

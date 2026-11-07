@@ -30,6 +30,7 @@ Command line options:
   --sleep    Pause execution for a short period before processing.
   --help     Show this help message and exit.
   --file     Specify a single artist.yml file to process. Must be the full path to the file.
+  --dir      Process one artist directory, creating artist.yml from local clues if missing.
   --force    Force processing of all files, ignoring the pre-pass duplicate check and validation check.
 """
 
@@ -41,10 +42,15 @@ import string
 import shutil
 import tempfile
 import time
+from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Protocol, TextIO, cast
 
+import mutagen
 from openai import APIStatusError, OpenAI
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 from tqdm import tqdm
 
 from mediascan.types.artist.artist_yaml_file_validator import (
@@ -59,6 +65,9 @@ from mediascripts.artist.artist_yaml.artist_yaml_common import (
 )
 from mediascripts.common.cli.parse_boolean import parse_boolean
 from mediascripts.common.openai.client import BASE_URL, MODEL_NAME, get_client
+from mediascripts.lyrics.lyrics_common import MEDIA_EXTENSIONS
+from mediascripts.mediafile.auto_tag_media_file import load_media, text_values, unescape_name
+from mediascripts.track.track_yaml.track_yaml_common import TextWriter
 
 # Configure with LOG_LEVEL=DEBUG for additional diagnostic detail.
 logging.basicConfig(
@@ -93,6 +102,102 @@ regionCode, languageCodes, and optional dob/dod dates. Dates use y and optional
 m/d integer fields. Preserve existing non-empty values and omit facts that cannot
 be established.
 """
+
+
+class _YamlIO(Protocol):
+    def load(self, stream: TextIO) -> object: ...
+    def dump(self, data: Mapping[str, object], stream: TextWriter) -> None: ...
+
+
+def infer_artist_name(artist_dir: Path) -> str:
+    """Prefer track YAML over media tags across immediate album subdirectories."""
+    album_files = [
+        path for directory in sorted(artist_dir.iterdir()) if directory.is_dir()
+        for path in sorted(directory.iterdir()) if path.is_file()
+    ]
+    for source in ("YAML", "media"):
+        names: list[str] = []
+        for path in album_files:
+            try:
+                if source == "YAML":
+                    if path.suffix.lower() not in {".yml", ".yaml"} or path.stem.lower() in {
+                        "album", "artist", "files", "artists",
+                    }:
+                        continue
+                    with path.open(encoding="utf-8") as stream:
+                        document = cast(_YamlIO, YAML(typ="safe")).load(stream)
+                    if not isinstance(document, dict):
+                        raise ValueError("Expected a YAML mapping")
+                    document_mapping = cast(Mapping[str, object], document)
+                    data = document_mapping.get("trackData", document_mapping.get("track_data"))
+                    if data is None:
+                        continue
+                    if not isinstance(data, dict):
+                        raise ValueError("Expected a trackData mapping")
+                    metadata = cast(Mapping[str, object], data)
+                    candidates = [metadata.get("albumartist"), metadata.get("artist")]
+                    for candidate in candidates:
+                        if candidate is not None and not isinstance(candidate, str):
+                            raise ValueError("Track artist names must be strings")
+                    name = next(
+                        (candidate.strip() for candidate in candidates if isinstance(candidate, str) and candidate.strip()),
+                        "",
+                    )
+                else:
+                    if path.suffix.lower() not in MEDIA_EXTENSIONS:
+                        continue
+                    media = load_media(path)
+                    candidates = [value for value in text_values(media, "albumartist") if value.strip()]
+                    if not candidates:
+                        candidates = text_values(media, "artist")
+                    name = next((candidate.strip() for candidate in candidates if candidate.strip()), "")
+                if name:
+                    names.append(name)
+            except (OSError, UnicodeError, ValueError, TypeError, YAMLError, mutagen.MutagenError) as error:
+                logger.warning("Could not read artist clues from %s: %s", path, error)
+        if names:
+            counts = Counter(names)
+            name = counts.most_common(1)[0][0]
+            if len(counts) > 1:
+                logger.warning("Conflicting %s artist names in %s: %s; selecting %r", source, artist_dir, dict(counts), name)
+            logger.info("Using %s artist name %r for %s", source, name, artist_dir)
+            return name
+    name = unescape_name(artist_dir.name)
+    if not name:
+        raise ValueError(f"Cannot infer artist name from {artist_dir}")
+    logger.info("No track artist clues found; using directory name %r", name)
+    return name
+
+
+def ensure_artist_yaml(artist_dir: Path, overrides: Mapping[str, object]) -> tuple[Path, bool]:
+    """Create a minimal schema without overwriting an existing artist file."""
+    if not artist_dir.is_dir():
+        raise NotADirectoryError(f"Artist directory does not exist or is not a directory: {artist_dir}")
+    path = artist_dir / "artist.yml"
+    if path.exists():
+        if not path.is_file():
+            raise ValueError(f"Artist YAML path is not a file: {path}")
+        logger.info("Using existing artist YAML: %s", path)
+        return path, False
+    data: dict[str, object] = {
+        "artistNames": overrides.get("artistNames") or [infer_artist_name(artist_dir)],
+        "city": "", "countryCode": "", "regionCode": "", "languageCodes": [],
+    }
+    data.update(overrides)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=artist_dir,
+            prefix=".artist.yml.", suffix=".tmp", delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            cast(_YamlIO, YAML()).dump({"artistData": data}, stream)
+        os.link(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    logger.info("Created minimal artist YAML from local clues: %s", path)
+    return path, True
 
 
 def process_artist_yaml_file(
@@ -373,6 +478,7 @@ def main_loop(
         return
     if specific_file:
         specific_file = Path(specific_file)
+        collection_data_path = specific_file.parent
         total_files = 1
     else:
         total_files = len(load_input_files(collection_data_path, letter_dirs))
@@ -410,7 +516,7 @@ def main_loop(
                 time.sleep(1)
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Process artist YAML files or clean up backup files."
     )
@@ -432,24 +538,51 @@ def main():
         metavar="true|false",
         help="Enable LLM lookups (default: true). Use --llm=false for pre-pass only.",
     )
-    parser.add_argument(
+    targets = parser.add_mutually_exclusive_group()
+    targets.add_argument(
         "--file",
         type=str,
         default=None,
         help="Process a single specific artist YAML file instead of scanning all directories.",
     )
+    targets.add_argument(
+        "--dir", type=Path,
+        help="Process an artist directory; create missing artist.yml from CLI, track YAML, media tags, or directory name.",
+    )
+    parser.add_argument("--artist", action="append", help="Artist name for a new artist.yml; repeat for aliases.")
+    parser.add_argument("--city", help="City for a new artist.yml.")
+    parser.add_argument("--country-code", help="Country code for a new artist.yml.")
+    parser.add_argument("--region-code", help="Region code for a new artist.yml.")
+    parser.add_argument("--language-code", action="append", help="Language code for a new artist.yml; repeat for languages.")
     parser.add_argument(
         "--force",
         action="store_true",
         default=False,
         help="Force processing of all files, ignoring the pre-pass duplicate check and validation check.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    seed_options: dict[str, str | list[str] | None] = {
+        "artistNames": args.artist, "city": args.city, "countryCode": args.country_code,
+        "regionCode": args.region_code, "languageCodes": args.language_code,
+    }
+    overrides = {key: value for key, value in seed_options.items() if value is not None}
+    if overrides and args.dir is None:
+        parser.error("Artist metadata options require --dir")
+    for key, value in overrides.items():
+        entries = value if isinstance(value, list) else [value]
+        if any(not entry.strip() for entry in entries):
+            parser.error(f"{key} must not be empty")
+    if args.clean and args.dir is not None:
+        parser.error("--clean cannot be combined with --dir")
 
     if args.clean:
         clean()
     else:
         try:
+            if args.dir is not None:
+                specific_file, created = ensure_artist_yaml(args.dir, overrides)
+                args.file = specific_file
+                args.force = args.force or created
             main_loop(
                 sleep_between_files=args.sleep,
                 llm_enabled=args.llm,
@@ -458,7 +591,12 @@ def main():
             )
         except KeyboardInterrupt:
             logger.info("Interrupted by user; exiting")
+            return 130
+        except (OSError, ValueError, TypeError, YAMLError) as error:
+            logger.error("Could not process artist directory: %s", error)
+            return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
