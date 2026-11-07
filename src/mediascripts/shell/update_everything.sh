@@ -18,7 +18,7 @@ cd "$MOONGAS_COLLECTION_ROOTDIR"
 # [as MOONGAS_USER] Run the following commands as the target Moongas user.
 # Using a quoted Here-Doc (<<'EOF') prevents the root shell from expanding variables early,
 # and passing it to sudo -u ensures it runs completely in the target user's context.
-sudo -i -u "$MOONGAS_USER" MOONGAS_COLLECTION_ROOTDIR="$MOONGAS_COLLECTION_ROOTDIR" bash <<'EOF'
+sudo -i -u "$MOONGAS_USER" MOONGAS_COLLECTION_ROOTDIR="$MOONGAS_COLLECTION_ROOTDIR" MOONGAS_REMOTE_SERVER_IP="$MOONGAS_REMOTE_SERVER_IP" MOONGAS_REMOTE_MEDIA_ROOTDIR="$MOONGAS_REMOTE_MEDIA_ROOTDIR" bash <<'EOF'
   set -euo pipefail
   cd "$MOONGAS_COLLECTION_ROOTDIR"
   ./scan-to-track-yaml
@@ -27,6 +27,7 @@ sudo -i -u "$MOONGAS_USER" MOONGAS_COLLECTION_ROOTDIR="$MOONGAS_COLLECTION_ROOTD
   ./update-covers
   ./upload-covers
   ./update-lyrics
+  ./update-yaml
   ./restart-remote-services
 EOF
 
