@@ -1,19 +1,25 @@
+#!/usr/bin/env bash
+
 # MOONGAS_USER must be supplied by the calling environment
 : "${MOONGAS_USER?Error: MOONGAS_USER environment variable is not set.}"
 
-# Load the required variables from MOONGAS_USER's login environment
-eval "$(
-    sudo -u "$MOONGAS_USER" -i bash -c '
-        printf "MOONGAS_COLLECTION_ROOTDIR=%q\n" "$MOONGAS_COLLECTION_ROOTDIR"
-        printf "MOONGAS_REMOTE_SERVER_IP=%q\n" "$MOONGAS_REMOTE_SERVER_IP"
-        printf "MOONGAS_REMOTE_MEDIA_ROOTDIR=%q\n" "$MOONGAS_REMOTE_MEDIA_ROOTDIR"
-    '
-)"
+# Retrieve variables from the target user's interactive Bash environment
+MOONGAS_COLLECTION_ROOTDIR=$(
+    sudo -H -u "$MOONGAS_USER" bash -ic 'printf "%s" "$MOONGAS_COLLECTION_ROOTDIR"' 2>/dev/null
+)
 
-# Verify that all required variables were obtained
-: "${MOONGAS_COLLECTION_ROOTDIR?Error: MOONGAS_COLLECTION_ROOTDIR is not set.}"
-: "${MOONGAS_REMOTE_SERVER_IP?Error: MOONGAS_REMOTE_SERVER_IP is not set.}"
-: "${MOONGAS_REMOTE_MEDIA_ROOTDIR?Error: MOONGAS_REMOTE_MEDIA_ROOTDIR is not set.}"
+MOONGAS_REMOTE_SERVER_IP=$(
+    sudo -H -u "$MOONGAS_USER" bash -ic 'printf "%s" "$MOONGAS_REMOTE_SERVER_IP"' 2>/dev/null
+)
+
+MOONGAS_REMOTE_MEDIA_ROOTDIR=$(
+    sudo -H -u "$MOONGAS_USER" bash -ic 'printf "%s" "$MOONGAS_REMOTE_MEDIA_ROOTDIR"' 2>/dev/null
+)
+
+# Verify required variables
+: "${MOONGAS_COLLECTION_ROOTDIR:?Error: MOONGAS_COLLECTION_ROOTDIR is not set.}"
+: "${MOONGAS_REMOTE_SERVER_IP:?Error: MOONGAS_REMOTE_SERVER_IP is not set.}"
+: "${MOONGAS_REMOTE_MEDIA_ROOTDIR:?Error: MOONGAS_REMOTE_MEDIA_ROOTDIR is not set.}"
 
 # Updates everything and uploads to the active remote Moongas server
 set -euo pipefail
