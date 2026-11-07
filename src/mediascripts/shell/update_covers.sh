@@ -25,7 +25,7 @@ set -euo pipefail
 #   --dir-copy-mode {DirCopyMode.SingleDirectory,DirCopyMode.PreserveStructure}
 #                         Directory structure copy mode.
 
-copy-medialib \
+./copy-medialib \
   --src-paths /data/Music /data/MusicOther \
   --dst-path /data/Covers \
   --include-filenames cover.jpg \
@@ -63,7 +63,7 @@ copy-medialib \
 #                         Destination tarball file path (default: /data/Covers.tar.gz).
 #   --skip-archive        Skip creation of the tar archive after conversion.
 
-convert-covers \
+./convert-covers \
   --src-paths /data/Covers/Music /data/Covers/MusicOther \
   --src-filename cover.jpg \
   --dst-filename cover.webp \
