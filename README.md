@@ -110,7 +110,7 @@ Explicit arguments override same-basename `.yml` / `.yaml` `trackData` values
 artist directory, album directory, bracketed album year, and filename without
 its leading track number. The artist directory supplies both artist and album
 artist unless overridden. Existing differing text tags are updated; unrelated
-tags and artwork are preserved. No genre is guessed. `--genre` matches mediascan
+tags and artwork are preserved. `--genre` matches mediascan
 `Genre` enum values case-insensitively, ignoring hyphens, and writes the enum's
 canonical spelling (for example, `--genre jazz` writes `Jazz`, and
 `--genre synthpop` writes `Synth-pop`); invalid CLI values log
@@ -119,6 +119,15 @@ An invalid YAML genre causes the genre field to be cleared with a warning,
 unless overridden by a valid CLI genre. Without a CLI/YAML genre,
 existing file genres are checked; if any value is invalid the whole genre
 field is cleared. Dry-run warns and proposes clearing without saving.
+When no valid genre is supplied by the CLI, target track YAML, or existing
+target tags, the script infers the most common valid genre from other tracks
+in the same album and immediate sibling album directories under the artist.
+Each neighboring track counts once, preferring its valid YAML genre over
+media tags; duplicate formats do not multiply votes. The target track is
+excluded. Only exact enum values count; ties use alphabetical order.
+The counts and selected genre are logged, unreadable clues are warned about,
+and neighboring files are never modified. If no valid clues exist, no genre
+is added. Dry-run shows the proposed inferred genre without saving.
 Other invalid metadata is reported, not silently ignored.
 
 When the filename begins with a number from 1 through 99, that number sets the

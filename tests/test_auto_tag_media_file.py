@@ -496,6 +496,78 @@ def test_valid_or_absent_existing_genre_preserved(track: Path, genres: list[str]
     assert tagger.text_values(ID3(track), "genre") == genres
 
 
+def genre_neighbor(path: Path, genre: str, *, yaml_genre: str | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tags = ID3()
+    tags.add(TCON(encoding=3, text=[genre]))
+    tags.save(path)
+    if yaml_genre is not None:
+        write_yaml(path, {"genre": yaml_genre})
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_artist_genre_inference_counts_tracks_once(
+    track: Path, dry_run: bool, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str],
+) -> None:
+    genre_neighbor(track.with_name("01.mp3"), "Hip-Hop", yaml_genre="Jazz")
+    genre_neighbor(track.with_name("01.MP3"), "Hip-Hop")
+    other = track.parent.parent / "Other [2000]"
+    genre_neighbor(other / "02.mp3", "Jazz")
+    genre_neighbor(other / "03.mp3", "Hip-Hop")
+    genre_neighbor(other / "04.mp3", "made up")
+    genre_neighbor(track.parent.parent.parent / "Other Artist" / "Album" / "01.mp3", "Hip-Hop")
+    before = {p: p.read_bytes() for p in track.parent.parent.rglob("*") if p.is_file()}
+    with caplog.at_level(logging.INFO):
+        assert tagger.auto_tag_media_file(track, dry_run=dry_run)
+    assert "  genre: ['Jazz']" in capsys.readouterr().out
+    assert "Inferred artist genre 'Jazz'" in caplog.text
+    assert "'Jazz': 2" in caplog.text
+    for p, contents in before.items():
+        if dry_run or p != track:
+            assert p.read_bytes() == contents
+    if not dry_run:
+        assert str(ID3(track)["TCON"]) == "Jazz"
+
+
+@pytest.mark.parametrize("source", ["cli", "yaml", "tags"])
+def test_genre_inference_preserves_higher_priority_genre(
+    track: Path, source: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_scan(path: Path) -> str:
+        pytest.fail("A valid target genre must prevent neighbor scanning")
+
+    monkeypatch.setattr(tagger, "infer_artist_genre", fail_scan)
+    if source == "yaml":
+        write_yaml(track, {"genre": "Jazz"})
+    elif source == "tags":
+        tags = ID3(track)
+        tags.add(TCON(encoding=3, text=["Jazz"]))
+        tags.save(track)
+    tagger.auto_tag_media_file(track, **({"genre": "Jazz"} if source == "cli" else {}))
+    assert str(ID3(track)["TCON"]) == "Jazz"
+
+
+def test_genre_inference_invalid_target_and_unreadable_clues(
+    track: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    tags = ID3(track)
+    tags.add(TCON(encoding=3, text=["made up"]))
+    tags.save(track)
+    neighbor = track.with_name("01.mp3")
+    genre_neighbor(neighbor, "Jazz")
+    neighbor.with_suffix(".yml").write_text("trackData: [")
+    tagger.auto_tag_media_file(track)
+    assert str(ID3(track)["TCON"]) == "Jazz"
+    assert "Could not read neighboring track YAML" in caplog.text
+
+
+def test_artist_genre_tie_is_alphabetical_and_target_excluded(track: Path) -> None:
+    genre_neighbor(track.with_name("01.mp3"), "Jazz")
+    genre_neighbor(track.with_name("02.mp3"), "Hip-Hop")
+    write_yaml(track, {"genre": "Jazz"})
+    assert tagger.infer_artist_genre(track) == "Hip-Hop"
+
+
 def test_missing_and_unrecognized_files(tmp_path: Path) -> None:
     assert tagger.main(["--file", str(tmp_path / "missing.mp3")]) == 1
     path = tmp_path / "file.txt"
