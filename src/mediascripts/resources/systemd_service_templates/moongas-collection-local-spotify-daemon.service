@@ -1,0 +1,20 @@
+[Unit]
+Description=Moongas Collection Local Spotify Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=mguser
+WorkingDirectory=/home/mguser/Git/moongas.org/moongas-collection-local
+ExecStart=/home/mguser/Git/moongas.org/moongas-collection-local/.venv/bin/python -m mediascripts.spotify.spotify
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+Environment="MOONGAS_COLLECTION_ROOTDIR=/home/mguser/Git/moongas.org/moongas-collection-local"
+Environment="SPOTIFY_API_CLIENT_ID=1234"
+Environment="SPOTIFY_API_CLIENT_SECRET=1234"
+
+[Install]
+WantedBy=multi-user.target
+

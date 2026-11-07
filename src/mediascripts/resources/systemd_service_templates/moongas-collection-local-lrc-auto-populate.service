@@ -1,0 +1,18 @@
+[Unit]
+Description=Moongas Collection Local LRC (Lyrics) Auto-Populate Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=mguser
+WorkingDirectory=/home/mguser/Git/moongas.org/moongas-collection-local
+ExecStart=/home/mguser/Git/moongas.org/moongas-collection-local/.venv/bin/python -m mediascripts.lyrics.lyrics_lrc.lyrics_lrc_auto_populate --cpu
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+Environment="MOONGAS_COLLECTION_ROOTDIR=/home/mguser/Git/moongas.org/moongas-collection-local"
+
+[Install]
+WantedBy=multi-user.target
+

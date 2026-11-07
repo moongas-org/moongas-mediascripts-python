@@ -1,0 +1,18 @@
+[Unit]
+Description=Run Moongas-Collection-Local Update Everything Script Hourly
+
+[Timer]
+# Option A: Run exactly at the start of every hour (e.g., 1:00, 2:00)
+OnCalendar=hourly
+
+# Option B: Alternatively, run exactly 1 hour after the last time it finished
+# OnUnitActiveSec=1h
+
+# Helps distribute system load by allowing a 5-minute window for execution
+AccuracySec=5m
+# Ensures it catches up immediately if the system was shut down when it should have run
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

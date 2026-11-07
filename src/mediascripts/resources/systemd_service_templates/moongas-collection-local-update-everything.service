@@ -1,0 +1,17 @@
+[Unit]
+Description=Moongas Collection Local Update Everything Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/mguser/Git/moongas.org/moongas-collection-local
+ExecStart=/home/mguser/Git/moongas.org/moongas-collection-local/update-everything
+StandardOutput=journal
+StandardError=journal
+Environment="MOONGAS_COLLECTION_ROOTDIR=/home/mguser/Git/moongas.org/moongas-collection-local"
+Environment="MOONGAS_USER=mguser"
+
+[Install]
+WantedBy=multi-user.target
+
