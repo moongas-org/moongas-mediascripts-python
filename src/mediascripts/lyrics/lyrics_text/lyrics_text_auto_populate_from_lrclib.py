@@ -36,7 +36,7 @@ which in turn contains one or more library directories e.g. `Music`
 
 Command line options:
   --sleep            Initial seconds between LRCLIB requests (default: 0.5).
-                     Each HTTP 4xx/5xx response adds 0.5 seconds for the rest of the run.
+  --backoff          Seconds added after each HTTP 4xx/5xx (default: 0.5); 0 disables backoff.
   --lookup           Enable LRCLIB lookups (default: true). Use --lookup=false to only list missing lyrics files.
   --file             Specify a media track or track YAML (.yml/.yaml) file.
                      Lyrics use the same basename. A sibling media file supplies tags
@@ -49,6 +49,7 @@ Command line options:
 import argparse
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -98,7 +99,9 @@ LRC_TIMESTAMP_PATTERN = re.compile(r"^\s*(?:\[\d+:\d+(?:[.:]\d+)?\])+\s?", re.MU
 
 LRCLIB_BASE_URL = "https://lrclib.net"
 LRCLIB_MAX_ATTEMPTS = 5
+DEFAULT_BACKOFF_SECONDS = 0.5
 _request_delay_seconds = 0.5
+_backoff_seconds = DEFAULT_BACKOFF_SECONDS
 _retry_after_seconds = 0.0
 # LRCLIB only matches /api/get when durations are within ±2 seconds
 DURATION_TOLERANCE_SECONDS = 2
@@ -181,14 +184,14 @@ def lrclib_request(endpoint: str, params: dict[str, Any]) -> Any:
         return record
     except HTTPError as e:
         if 400 <= e.code < 600:
-            _request_delay_seconds += 0.5
+            _request_delay_seconds += _backoff_seconds
             logger.warning(
-                "LRCLIB GET %s returned HTTP %d; request delay increased to %.1f seconds",
+                "LRCLIB GET %s returned HTTP %d; request delay is %g seconds",
                 endpoint, e.code, _request_delay_seconds,
             )
         if e.code == 404:
             return None
-        if e.code == 429 or 500 <= e.code < 600:
+        if _backoff_seconds and (e.code == 429 or 500 <= e.code < 600):
             try:
                 _retry_after_seconds = float(e.headers.get("Retry-After", "5"))
             except ValueError:
@@ -196,9 +199,22 @@ def lrclib_request(endpoint: str, params: dict[str, Any]) -> Any:
         raise
 
 
-def reset_request_timing(initial_delay: float) -> None:
-    global _request_delay_seconds, _retry_after_seconds
+def parse_backoff(value: str) -> float:
+    try:
+        backoff = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("backoff must be a non-negative finite number") from error
+    if not math.isfinite(backoff) or backoff < 0:
+        raise argparse.ArgumentTypeError("backoff must be a non-negative finite number")
+    return backoff
+
+
+def reset_request_timing(initial_delay: float, backoff: float = DEFAULT_BACKOFF_SECONDS) -> None:
+    global _request_delay_seconds, _backoff_seconds, _retry_after_seconds
+    if not math.isfinite(backoff) or backoff < 0:
+        raise ValueError("backoff must be a non-negative finite number")
     _request_delay_seconds = initial_delay
+    _backoff_seconds = backoff
     _retry_after_seconds = 0.0
 
 
@@ -371,8 +387,9 @@ def main_loop(
     specific_file: Optional[Path] = None,
     retry_not_found: bool = False,
     specific_dir: Optional[Path] = None,
+    backoff: float = DEFAULT_BACKOFF_SECONDS,
 ):
-    reset_request_timing(sleep_between_requests)
+    reset_request_timing(sleep_between_requests, backoff)
     collection_data_path = Path(MOONGAS_COLLECTION_ROOTDIR) / "data"
     logger.info("Collection data directory: %s", collection_data_path.resolve())
 
@@ -473,9 +490,13 @@ def main():
         "--sleep",
         type=float,
         default=0.5,
+        help="Initial seconds between LRCLIB requests (default: 0.5); see --backoff for error delays.",
+    )
+    parser.add_argument(
+        "--backoff", type=parse_backoff, default=DEFAULT_BACKOFF_SECONDS,
         help=(
-            "Initial seconds between LRCLIB requests (default: 0.5). "
-            "Each HTTP 4xx/5xx response adds 0.5 seconds for the rest of the run."
+            "Seconds added to the request delay after each HTTP 4xx/5xx for the rest of the run "
+            "(default: 0.5); 0 disables backoff and Retry-After delays."
         ),
     )
     parser.add_argument(
@@ -508,6 +529,7 @@ def main():
     try:
         main_loop(
             sleep_between_requests=args.sleep,
+            backoff=args.backoff,
             lookup_enabled=args.lookup,
             specific_file=args.file,
             retry_not_found=args.retry_not_found,

@@ -202,6 +202,14 @@ loading a model. Cached LRCLIB misses skip repeat requests but still proceed to
 local transcription. Transcription failures are counted as errors while the
 batch continues. Model weights may download on first use.
 
+For LRCLIB lookups, both `lyrics-text-auto-populate` and
+`lyrics-text-auto-populate-from-lrclib` accept `--sleep` for the initial delay
+between requests (default 0.5 seconds) and `--backoff` for the amount added
+to that delay after each HTTP 4xx/5xx response for the rest of the run
+(default 0.5 seconds). With nonzero backoff, 429/5xx responses may also use
+`Retry-After` for the next request. Set `--backoff 0` to disable both increases
+and `Retry-After` delays, leaving only the `--sleep` delay between requests.
+
 The local-transcription-only command is also available:
 
 ```bash
@@ -216,7 +224,11 @@ python -m mediascripts.lyrics.lyrics_text.lyrics_text_auto_populate_from_file --
 ```
 
 The model loads once per batch (`small` by default) with int8 quantization;
-weights may download on first use. `--device` selects a faster-whisper device,
+weights may download on first use. Both text-transcription commands log model
+loading and the `model.bin` size when available. For remote models this involves
+a best-effort Hugging Face metadata request; failures do not prevent loading, and
+`HF_HUB_OFFLINE=1` skips the request. Local checkpoints use their local file size.
+`--device` selects a faster-whisper device,
 with `--cpu` taking precedence. For both text-lyrics commands, transcription uses
 the first `languageCodes` entry in the artist's `artist.yml` (one directory above
 the album), overriding `--language`. If the file is absent or the list is empty,

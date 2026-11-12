@@ -11,6 +11,7 @@ import pytest
 from mediascripts.common import files
 from mediascripts.lyrics import lyrics_common
 from mediascripts.lyrics.lyrics_text import lyrics_text_auto_populate_from_file as text
+from mediascripts.lyrics.lyrics_text import lyrics_text_common
 
 
 @dataclass
@@ -46,7 +47,7 @@ def install_model(monkeypatch: pytest.MonkeyPatch, model: Model) -> list[tuple[s
         assert name == "faster_whisper"
         return Whisper()
 
-    monkeypatch.setattr(text, "import_module", import_whisper)
+    monkeypatch.setattr(lyrics_text_common, "import_module", import_whisper)
     return loads
 
 
@@ -213,7 +214,7 @@ def test_listing_does_not_import_or_shuffle_and_is_sorted(
     def unexpected(*args: object) -> None:
         pytest.fail("Listing must not load faster-whisper or shuffle")
 
-    monkeypatch.setattr(text, "import_module", unexpected)
+    monkeypatch.setattr(lyrics_text_common, "import_module", unexpected)
     monkeypatch.setattr(files.random, "shuffle", unexpected)
     monkeypatch.setattr(sys, "argv", ["lyrics-text-auto-populate-from-file", "--dir", str(tmp_path), option])
     with caplog.at_level(logging.INFO):
@@ -317,7 +318,7 @@ def test_setup_failure_is_reported(
             raise ImportError("faster_whisper is not installed")
         return Whisper()
 
-    monkeypatch.setattr(text, "import_module", load)
+    monkeypatch.setattr(lyrics_text_common, "import_module", load)
     assert text.main_loop(specific_file=track) == 1
     assert ("Could not import" if failure == "import" else "Could not load") in caplog.text
     assert not track.with_suffix(".txt").exists()
@@ -344,7 +345,7 @@ def test_no_work_does_not_load_whisper(tmp_path: Path, monkeypatch: pytest.Monke
     def unexpected(name: str) -> None:
         pytest.fail("No-work run must not load faster-whisper")
 
-    monkeypatch.setattr(text, "import_module", unexpected)
+    monkeypatch.setattr(lyrics_text_common, "import_module", unexpected)
     assert text.main_loop(specific_dir=tmp_path) == 0
 
 

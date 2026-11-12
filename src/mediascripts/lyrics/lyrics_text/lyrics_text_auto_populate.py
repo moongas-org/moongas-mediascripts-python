@@ -5,9 +5,7 @@ import logging
 import random
 from collections import Counter, deque
 from datetime import date
-from importlib import import_module
 from pathlib import Path
-from typing import cast
 
 from tqdm import tqdm
 
@@ -28,7 +26,9 @@ from mediascripts.lyrics.lyrics_text import (
     lyrics_text_auto_populate_from_lrclib as lrclib,
 )
 from mediascripts.lyrics.lyrics_text.lyrics_text_common import (
+    TranscriptionModel,
     has_lyrics_text,
+    load_transcription_model,
     log_missing_lyrics_files,
 )
 
@@ -71,31 +71,6 @@ def _find_tracks(
     return lrclib.find_tracks_missing_lyrics(collection_data_path)
 
 
-def _load_transcription_model(
-    model_name: str, device: str | None,
-) -> media_transcription.TranscriptionModel:
-    try:
-        faster_whisper = cast(
-            media_transcription.FasterWhisper, import_module("faster_whisper"),
-        )
-    except ImportError:
-        logger.exception(
-            "Could not import faster_whisper; install with pip install 'mediascripts[lyrics]'"
-        )
-        raise
-    try:
-        logger.info(
-            "Loading faster-whisper model %s (device=%s, compute_type=int8)",
-            model_name, device or "auto",
-        )
-        return faster_whisper.WhisperModel(
-            model_name, device=device or "auto", compute_type="int8",
-        )
-    except (OSError, RuntimeError, ValueError):
-        logger.exception("Could not load faster-whisper model %s", model_name)
-        raise
-
-
 def _record_lookup_cache(
     cache: dict[str, dict[str, str]], track_path: Path, lookup_status: str,
 ) -> None:
@@ -115,8 +90,9 @@ def main_loop(
     model_name: str = "small",
     language: str = "en",
     device: str | None = None,
+    backoff: float = lrclib.DEFAULT_BACKOFF_SECONDS,
 ) -> int:
-    lrclib.reset_request_timing(sleep_between_requests)
+    lrclib.reset_request_timing(sleep_between_requests, backoff)
     try:
         tracks = _find_tracks(specific_file, specific_dir)
     except OSError:
@@ -136,7 +112,7 @@ def main_loop(
     attempts: Counter[Path] = Counter()
     queue = deque(tracks)
     statuses: Counter[str] = Counter()
-    transcription_model: media_transcription.TranscriptionModel | None = None
+    transcription_model: TranscriptionModel | None = None
     model_load_failed = False
     had_lookup_request = False
 
@@ -176,7 +152,7 @@ def main_loop(
                 ):
                     if transcription_model is None and not model_load_failed:
                         try:
-                            transcription_model = _load_transcription_model(model_name, device)
+                            transcription_model = load_transcription_model(model_name, device)
                         except (ImportError, OSError, RuntimeError, ValueError):
                             model_load_failed = True
                     if transcription_model is None:
@@ -238,9 +214,13 @@ def main() -> int:
         "--sleep",
         type=float,
         default=0.5,
+        help="Initial seconds between LRCLIB requests (default: 0.5); see --backoff for error delays.",
+    )
+    parser.add_argument(
+        "--backoff", type=lrclib.parse_backoff, default=lrclib.DEFAULT_BACKOFF_SECONDS,
         help=(
-            "Initial seconds between LRCLIB requests (default: 0.5). "
-            "Each HTTP 4xx/5xx response adds 0.5 seconds for the rest of the run."
+            "Seconds added to the request delay after each HTTP 4xx/5xx for the rest of the run "
+            "(default: 0.5); 0 disables backoff and Retry-After delays."
         ),
     )
     parser.add_argument(
@@ -285,6 +265,7 @@ def main() -> int:
     try:
         return main_loop(
             sleep_between_requests=args.sleep,
+            backoff=args.backoff,
             lookup_enabled=args.lookup,
             transcribe_enabled=args.transcribe,
             specific_file=args.file,

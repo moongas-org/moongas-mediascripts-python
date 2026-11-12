@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from mediascripts.lyrics import lyrics_common
+from mediascripts.lyrics.lyrics_text import lyrics_text_auto_populate as combined
 from mediascripts.lyrics.lyrics_text import lyrics_text_auto_populate_from_lrclib
 
 
@@ -499,6 +500,92 @@ def test_increased_delay_applies_to_search_and_next_track_and_resets_each_run(
         lyrics_text_auto_populate_from_lrclib.main_loop(0.5, specific_dir=tmp_path)
         assert sleeps == [1.0, 1.5, 2.0]
         assert lyrics_text_auto_populate_from_lrclib._request_delay_seconds == 2.5
+
+
+@pytest.mark.parametrize("command", ["combined", "lrclib"])
+@pytest.mark.parametrize(
+    "backoff, expected_sleeps",
+    [
+        (None, [0.75, 1.25, 1.75]),
+        ("0", [0.25, 0.25, 0.25]),
+        ("0.125", [0.375, 0.5, 0.625]),
+    ],
+)
+def test_cli_backoff_applies_to_search_and_next_track(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    command: str, backoff: str | None, expected_sleeps: list[float],
+) -> None:
+    for name in ("01 - First.mp3", "02 - Second.mp3"):
+        (tmp_path / name).touch()
+    module = lyrics_text_auto_populate_from_lrclib
+    monkeypatch.setattr(module, "LOOKUP_CACHE_PATH", tmp_path / "cache.json")
+    monkeypatch.setattr(module.random, "shuffle", lambda tracks: None)
+    monkeypatch.setattr(
+        module, "read_track_info", lambda path: module.TrackInfo("Artist", "Track", "Album", 180),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+
+    def request(*args: object, **kwargs: object) -> None:
+        raise HTTPError("https://lrclib.net", 404, "Not found", Message(), None)
+
+    monkeypatch.setattr(module, "urlopen", request)
+    monkeypatch.setattr(module, "_backoff_seconds", 9.0)
+    args = [command, "--dir", str(tmp_path), "--sleep", "0.25"]
+    if backoff is not None:
+        args.extend(["--backoff", backoff])
+    if command == "combined":
+        args.append("--transcribe=false")
+    monkeypatch.setattr(sys, "argv", args)
+    (combined.main if command == "combined" else module.main)()
+    assert sleeps == expected_sleeps
+
+
+@pytest.mark.parametrize("command", ["combined", "lrclib"])
+@pytest.mark.parametrize("backoff, expected_sleep", [("0", 0.25), ("0.5", 10.0)])
+def test_cli_backoff_zero_disables_retry_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    command: str, backoff: str, expected_sleep: float,
+) -> None:
+    track = tmp_path / "01 - Track.mp3"
+    track.touch()
+    module = lyrics_text_auto_populate_from_lrclib
+    monkeypatch.setattr(module, "LOOKUP_CACHE_PATH", tmp_path / "cache.json")
+    monkeypatch.setattr(
+        module, "read_track_info", lambda path: module.TrackInfo("Artist", "Track", "Album", 180),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+    headers = Message()
+    headers["Retry-After"] = "10"
+    calls = 0
+
+    def request(*args: object, **kwargs: object) -> BytesIO:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise HTTPError("https://lrclib.net", 503, "Unavailable", headers, None)
+        return BytesIO(b'{"plainLyrics": "Lyrics"}')
+
+    monkeypatch.setattr(module, "urlopen", request)
+    args = [command, "--file", str(track), "--sleep", "0.25", "--backoff", backoff]
+    if command == "combined":
+        args.append("--transcribe=false")
+    monkeypatch.setattr(sys, "argv", args)
+    (combined.main if command == "combined" else module.main)()
+    assert calls == 2
+    assert sleeps == [expected_sleep]
+
+
+@pytest.mark.parametrize("command", ["combined", "lrclib"])
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_cli_rejects_invalid_backoff(
+    monkeypatch: pytest.MonkeyPatch, command: str, value: str,
+) -> None:
+    monkeypatch.setattr(sys, "argv", [command, "--backoff", value])
+    with pytest.raises(SystemExit) as exc:
+        (combined.main if command == "combined" else lyrics_text_auto_populate_from_lrclib.main)()
+    assert exc.value.code == 2
 
 
 def test_process_track_skips_existing_lyrics_before_reading_metadata(

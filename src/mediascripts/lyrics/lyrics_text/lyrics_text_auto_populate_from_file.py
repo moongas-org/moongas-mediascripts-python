@@ -14,10 +14,9 @@ import argparse
 import logging
 from collections import Counter
 from collections.abc import Iterable
-from importlib import import_module
 from pathlib import Path
 from subprocess import SubprocessError
-from typing import Protocol, cast
+from typing import cast
 
 from dataclass_wizard.v0.errors import JSONWizardError
 from mediascan.types.artist.artist_yaml_file import ArtistYamlFile
@@ -38,8 +37,11 @@ from mediascripts.lyrics.lyrics_common import (
     resolve_track_file,
 )
 from mediascripts.lyrics.lyrics_text.lyrics_text_common import (
+    TranscribedSegment,
+    TranscriptionModel,
     find_tracks_missing_lyrics as find_missing_lyrics,
     is_eligible,
+    load_transcription_model,
     log_missing_lyrics_files,
     save_lyrics_file_if_missing,
 )
@@ -47,26 +49,6 @@ from mediascripts.track.track_yaml.track_yaml_common import iter_collection_file
 
 configure_logging()
 logger = logging.getLogger(__name__)
-
-
-class TranscribedSegment(Protocol):
-    @property
-    def start(self) -> float: ...
-
-    @property
-    def text(self) -> str: ...
-
-
-class TranscriptionModel(Protocol):
-    def transcribe(
-        self, audio: str, *, language: str,
-    ) -> tuple[Iterable[TranscribedSegment], object]: ...
-
-
-class FasterWhisper(Protocol):
-    def WhisperModel(
-        self, model_size_or_path: str, *, device: str, compute_type: str,
-    ) -> TranscriptionModel: ...
 
 
 def find_tracks_missing_lyrics(path: Path, collection: bool = False) -> list[Path]:
@@ -153,17 +135,8 @@ def main_loop(
         return 0
 
     try:
-        faster_whisper = cast(FasterWhisper, import_module("faster_whisper"))
-    except ImportError:
-        logger.exception("Could not import faster_whisper; install with pip install 'mediascripts[lyrics]'")
-        return 1
-    try:
-        logger.info("Loading faster-whisper model %s (device=%s, compute_type=int8)", model_name, device or "auto")
-        model = faster_whisper.WhisperModel(
-            model_name, device=device or "auto", compute_type="int8",
-        )
-    except (OSError, RuntimeError, ValueError):
-        logger.exception("Could not load faster-whisper model %s", model_name)
+        model = load_transcription_model(model_name, device)
+    except (ImportError, OSError, RuntimeError, ValueError):
         return 1
 
     statuses: Counter[str] = Counter()

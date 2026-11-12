@@ -57,7 +57,7 @@ def test_saves_lrclib_result_without_loading_transcription(
 
     setup_lrclib(monkeypatch, lookup)
     monkeypatch.setattr(
-        combined, "_load_transcription_model",
+        combined, "load_transcription_model",
         lambda *args: pytest.fail("A successful LRCLIB result must not load a model"),
     )
     assert combined.main_loop(specific_file=track) == 0
@@ -101,7 +101,7 @@ def test_falls_back_to_media_after_lrclib_does_not_find_lyrics(
 
     setup_lrclib(monkeypatch, lookup)
     monkeypatch.setattr(combined.lrclib, "LRCLIB_MAX_ATTEMPTS", 1)
-    monkeypatch.setattr(combined, "_load_transcription_model", load_model)
+    monkeypatch.setattr(combined, "load_transcription_model", load_model)
     monkeypatch.setattr(combined.media_transcription, "process_track", transcribe)
 
     assert combined.main_loop(
@@ -125,7 +125,7 @@ def test_cached_not_found_skips_lrclib_but_still_tries_media(
     monkeypatch.setattr(combined.lrclib, "save_lookup_cache", lambda saved: None)
     monkeypatch.setattr(combined.random, "shuffle", lambda tracks: None)
     model = Model()
-    monkeypatch.setattr(combined, "_load_transcription_model", lambda *args: model)
+    monkeypatch.setattr(combined, "load_transcription_model", lambda *args: model)
     monkeypatch.setattr(
         combined.media_transcription, "process_track",
         lambda path, actual_model, language: transcription.STATUS_SAVED,
@@ -145,7 +145,7 @@ def test_fallback_transcription_uses_artist_language(
     )
     setup_lrclib(monkeypatch, lambda path: lrclib.STATUS_NOT_FOUND)
     model = Model()
-    monkeypatch.setattr(combined, "_load_transcription_model", lambda *args: model)
+    monkeypatch.setattr(combined, "load_transcription_model", lambda *args: model)
     assert combined.main_loop(specific_file=track, language="fr") == 0
     assert model.transcribed == [(str(track), "es")]
 
@@ -155,7 +155,7 @@ def test_transcription_failure_is_reported_after_lrclib_miss(
 ) -> None:
     track = make_track(tmp_path)
     setup_lrclib(monkeypatch, lambda path: lrclib.STATUS_NOT_FOUND)
-    monkeypatch.setattr(combined, "_load_transcription_model", lambda *args: Model())
+    monkeypatch.setattr(combined, "load_transcription_model", lambda *args: Model())
     monkeypatch.setattr(
         combined.media_transcription, "process_track",
         lambda *args: transcription.STATUS_ERROR,
@@ -176,13 +176,14 @@ def test_cli_accepts_the_union_of_lookup_and_transcription_options(
     monkeypatch.setattr(combined, "main_loop", main_loop)
     monkeypatch.setattr(sys, "argv", [
         "lyrics-text-auto-populate", "--file", str(track),
-        "--sleep", "0.25", "--lookup=false", "--transcribe=true",
+        "--sleep", "0.25", "--backoff", "0.75", "--lookup=false", "--transcribe=true",
         "--retry-not-found", "--model", "medium", "--language", "fr",
         "--cpu",
     ])
     assert combined.main() == 0
     assert captured == {
         "sleep_between_requests": 0.25,
+        "backoff": 0.75,
         "lookup_enabled": False,
         "transcribe_enabled": True,
         "specific_file": track,
