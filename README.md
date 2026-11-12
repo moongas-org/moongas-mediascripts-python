@@ -828,3 +828,17 @@ user@host:~/Git/moongas-org/moongas/moongas-collection-local$ ./show-env
 ------------------------------------------------------------------------------
 
 ```
+
+## NVidia CUDA Pascal Installation (Debian)
+
+I have a decade old budget graphics card (GTX 1060), so in order to use CUDA I have to manually install the older CUDA toolkit (because my 1060 is the older _Pascal_ architecture):
+
+```bash
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-ubuntu2404.pin
+sudo mv cuda-ubuntu2404.pin /etc/apt/preferences.d/cuda-repository-pin-600
+wget https://developer.download.nvidia.com/compute/cuda/13.5.0/local_installers/cuda-repo-ubuntu2404-13-5-local_13.5.0-1_amd64.deb
+sudo dpkg -i cuda-repo-ubuntu2404-13-5-local_13.5.0-1_amd64.deb
+sudo cp /var/cuda-repo-ubuntu2404-13-5-local/cuda-*-keyring.gpg /usr/share/keyrings/
+sudo apt-get update
+sudo apt-get -y install cuda-toolkit-13-5
+```
