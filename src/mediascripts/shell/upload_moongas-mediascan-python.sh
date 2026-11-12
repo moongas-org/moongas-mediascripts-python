@@ -9,3 +9,5 @@ DEST=$DEST_USER@$HOST:$DEST_ROOT/$SVC/
 echo "Uploading $SOURCE to $DEST"
 rsync -ahvP $SOURCE $DEST --delete --exclude '.git/' --exclude '.gitignore' --exclude '__pycache__/' --exclude='.venv*'
 echo "Uploaded $SOURCE to $DEST"
+ssh $DEST_USER@$HOST "cd /var/www/moongas && uv pip install ./moongas-mediascan-python --upgrade"
+echo "Installed/updated moongas-mediascan-python on $HOST"
