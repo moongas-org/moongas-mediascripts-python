@@ -133,6 +133,23 @@ def test_cached_not_found_skips_lrclib_but_still_tries_media(
     assert combined.main_loop(specific_file=track) == 0
 
 
+def test_fallback_transcription_uses_artist_language(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artist = tmp_path / "Artist"
+    track = make_track(artist / "Album [2000]")
+    (artist / "artist.yml").write_text(
+        "artistData:\n  artistNames: [Artist]\n  city: ''\n  countryCode: ''\n"
+        "  regionCode: ''\n  languageCodes: [es, en]\n",
+        encoding="utf-8",
+    )
+    setup_lrclib(monkeypatch, lambda path: lrclib.STATUS_NOT_FOUND)
+    model = Model()
+    monkeypatch.setattr(combined, "_load_transcription_model", lambda *args: model)
+    assert combined.main_loop(specific_file=track, language="fr") == 0
+    assert model.transcribed == [(str(track), "es")]
+
+
 def test_transcription_failure_is_reported_after_lrclib_miss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

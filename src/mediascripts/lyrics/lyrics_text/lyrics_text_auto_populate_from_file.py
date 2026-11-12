@@ -19,7 +19,11 @@ from pathlib import Path
 from subprocess import SubprocessError
 from typing import Protocol, cast
 
+from dataclass_wizard.v0.errors import JSONWizardError
+from mediascan.types.artist.artist_yaml_file import ArtistYamlFile
+from mediascan.types.artist.artist_yaml_file_loader import load_artist_yaml_file
 from tqdm import tqdm
+from yaml import YAMLError
 
 from mediascripts.common.cli.parse_boolean import parse_boolean
 from mediascripts.common.files import shuffled_files
@@ -77,12 +81,29 @@ def format_lyrics(segments: Iterable[TranscribedSegment]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def language_for_track(track_path: Path, fallback: str) -> str:
+    artist_yaml = track_path.parent.parent / "artist.yml"
+    try:
+        artist = cast(object, load_artist_yaml_file(artist_yaml))
+    except FileNotFoundError:
+        return fallback
+    if not isinstance(artist, ArtistYamlFile):
+        raise ValueError(f"Expected an artist mapping in {artist_yaml}")
+    language_codes = artist.artist_data.language_codes
+    if not language_codes:
+        return fallback
+    if not language_codes[0]:
+        raise ValueError(f"First language code is empty in {artist_yaml}")
+    return language_codes[0]
+
+
 def process_track(track_path: Path, model: TranscriptionModel, language: str = "en") -> str:
     if not is_eligible(track_path):
         logger.info("[%s] No longer eligible; skipping", track_path)
         return STATUS_SKIPPED
     lyrics_path = lyrics_text_path_for(track_path)
     try:
+        language = language_for_track(track_path, language)
         logger.info("[%s] Transcribing audio locally (language=%s)", track_path, language)
         segments, _ = model.transcribe(str(track_path), language=language)
         content = format_lyrics(segments)
@@ -91,7 +112,7 @@ def process_track(track_path: Path, model: TranscriptionModel, language: str = "
             return STATUS_SKIPPED
         logger.info("[%s] Saved transcribed lyrics to %s", track_path, lyrics_path)
         return STATUS_SAVED
-    except (OSError, UnicodeError, ValueError, RuntimeError, TypeError, SubprocessError):
+    except (OSError, UnicodeError, ValueError, RuntimeError, TypeError, SubprocessError, YAMLError, JSONWizardError):
         logger.exception("[%s] Failed to transcribe lyrics", track_path)
         return STATUS_ERROR
 
@@ -169,7 +190,10 @@ def main() -> int:
         metavar="true|false", help="Enable local transcription (default: true); false only lists eligible tracks.",
     )
     parser.add_argument("--model", default="small", help="faster-whisper model name or checkpoint path (default: small).")
-    parser.add_argument("--language", default="en", help="Lyrics language code (default: en).")
+    parser.add_argument(
+        "--language", default="en",
+        help="Fallback lyrics language code when artist.yml has no language codes (default: en).",
+    )
     parser.add_argument("--device", help="faster-whisper device, e.g. cpu or cuda (default: auto).")
     parser.add_argument("--cpu", action="store_true", help="Force CPU mode, overriding --device.")
     args = parser.parse_args()

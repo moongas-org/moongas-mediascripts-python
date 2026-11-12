@@ -217,8 +217,12 @@ python -m mediascripts.lyrics.lyrics_text.lyrics_text_auto_populate_from_file --
 
 The model loads once per batch (`small` by default) with int8 quantization;
 weights may download on first use. `--device` selects a faster-whisper device,
-with `--cpu` taking precedence. `--language` defaults to `en`. Transcribed segments
-are saved as plain text, one nonempty segment per line, without timestamps.
+with `--cpu` taking precedence. For both text-lyrics commands, transcription uses
+the first `languageCodes` entry in the artist's `artist.yml` (one directory above
+the album), overriding `--language`. If the file is absent or the list is empty,
+`--language` is used instead, defaulting to `en`. Invalid artist metadata is
+reported as a transcription error. Transcribed segments are saved as plain text,
+one nonempty segment per line, without timestamps.
 Speech recognition can mishear singing or hallucinate lyrics on instrumental
 audio; review generated text before using it for LRC alignment.
 

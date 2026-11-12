@@ -274,7 +274,10 @@ def main() -> int:
         help="Query LRCLIB again for tracks previously cached as not found.",
     )
     parser.add_argument("--model", default="small", help="faster-whisper model name or checkpoint path.")
-    parser.add_argument("--language", default="en", help="Lyrics language code (default: en).")
+    parser.add_argument(
+        "--language", default="en",
+        help="Fallback lyrics language code when artist.yml has no language codes (default: en).",
+    )
     parser.add_argument("--device", help="faster-whisper device, e.g. cpu or cuda (default: auto).")
     parser.add_argument("--cpu", action="store_true", help="Force CPU mode, overriding --device.")
     args = parser.parse_args()

@@ -110,6 +110,67 @@ def test_batch_loads_once_and_shuffles(
     assert existing.with_suffix(".txt").read_text() == "existing"
 
 
+@pytest.mark.parametrize("language_codes, expected", [
+    (["es", "en"], "es"),
+    ([], "fr"),
+])
+def test_artist_language_overrides_cli_per_track(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language_codes: list[str], expected: str,
+) -> None:
+    artist = tmp_path / "data" / "Music" / "Artist"
+    track = make_track(artist / "Album [2000]")
+    codes = "\n".join(f"    - {code}" for code in language_codes) or "    []"
+    (artist / "artist.yml").write_text(
+        "artistData:\n  artistNames: [Artist]\n  city: ''\n  countryCode: ''\n"
+        f"  regionCode: ''\n  languageCodes:\n{codes}\n",
+        encoding="utf-8",
+    )
+    model = Model()
+    install_model(monkeypatch, model)
+    assert text.main_loop(specific_file=track, language="fr") == 0
+    assert model.calls == [(str(track), expected)]
+
+
+def test_collection_uses_each_artists_language(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    music = tmp_path / "data" / "Music"
+    first = make_track(music / "First" / "Album [2000]")
+    second = make_track(music / "Second" / "Album [2000]")
+    for artist, language in (("First", "es"), ("Second", "ja")):
+        (music / artist / "artist.yml").write_text(
+            "artistData:\n  artistNames: [Artist]\n  city: ''\n  countryCode: ''\n"
+            f"  regionCode: ''\n  languageCodes: [{language}]\n",
+            encoding="utf-8",
+        )
+    model = Model()
+    install_model(monkeypatch, model)
+    monkeypatch.setattr(text, "MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    assert text.main_loop(language="fr") == 0
+    assert dict(model.calls) == {str(first): "es", str(second): "ja"}
+
+
+@pytest.mark.parametrize("content", [
+    "artistData: [",
+    "[]",
+    "artistData: null",
+    "artistData:\n  artistNames: [Artist]\n",
+    "artistData:\n  artistNames: [Artist]\n  city: ''\n  countryCode: ''\n"
+    "  regionCode: ''\n  languageCodes: ['']\n",
+])
+def test_invalid_artist_yaml_is_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, content: str,
+) -> None:
+    artist = tmp_path / "Artist"
+    track = make_track(artist / "Album [2000]")
+    (artist / "artist.yml").write_text(content, encoding="utf-8")
+    model = Model()
+    assert text.process_track(track, model, "fr") == text.STATUS_ERROR
+    assert "Failed to transcribe lyrics" in caplog.text
+    assert not model.calls
+    assert not track.with_suffix(".txt").exists()
+
+
 def test_collection_follows_library_symlinks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     data = tmp_path / "collection" / "data"
     data.mkdir(parents=True)
@@ -122,6 +183,24 @@ def test_collection_follows_library_symlinks(tmp_path: Path, monkeypatch: pytest
         data / "Music" / track.relative_to(library),
     ]
     assert text.main_loop(transcribe_enabled=False) == 0
+
+
+def test_artist_language_through_library_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = tmp_path / "collection" / "data"
+    data.mkdir(parents=True)
+    library = tmp_path / "library"
+    track = make_track(library / "Artist" / "Album [2000]")
+    (library / "Artist" / "artist.yml").write_text(
+        "artistData:\n  artistNames: [Artist]\n  city: ''\n  countryCode: ''\n"
+        "  regionCode: ''\n  languageCodes: [es]\n",
+        encoding="utf-8",
+    )
+    (data / "Music").symlink_to(library, target_is_directory=True)
+    model = Model()
+    install_model(monkeypatch, model)
+    monkeypatch.setattr(text, "MOONGAS_COLLECTION_ROOTDIR", str(data.parent))
+    assert text.main_loop(language="fr") == 0
+    assert model.calls == [(str(data / "Music" / track.relative_to(library)), "es")]
 
 
 @pytest.mark.parametrize("option", ["--transcribe=false", "--lookup=false"])
