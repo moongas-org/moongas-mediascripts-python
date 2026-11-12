@@ -54,6 +54,7 @@ import random
 import re
 import tempfile
 import time
+from collections.abc import Iterator
 from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import date
@@ -70,7 +71,6 @@ from tqdm import tqdm
 
 from mediascripts.common.cli.parse_boolean import parse_boolean
 from mediascripts.lyrics.lyrics_common import (
-    MEDIA_EXTENSIONS,
     MOONGAS_COLLECTION_ROOTDIR,
     STATUS_ERROR,
     STATUS_SAVED,
@@ -79,7 +79,12 @@ from mediascripts.lyrics.lyrics_common import (
     configure_logging,
     lyrics_text_path_for,
     resolve_track_file,
-    save_lyrics_file,
+)
+from mediascripts.lyrics.lyrics_text.lyrics_text_common import (
+    find_tracks_missing_lyrics as find_missing_lyrics,
+    has_lyrics_text,
+    log_missing_lyrics_files,
+    save_lyrics_file_if_missing,
 )
 
 # Configure with LOG_LEVEL=DEBUG for additional diagnostic detail.
@@ -268,44 +273,24 @@ def is_cached_as_skippable(
 
 def find_tracks_missing_lyrics(collection_data_path: Path) -> list[Path]:
     """Find media tracks in album directories without a sibling lyrics text file."""
-    missing: list[Path] = []
-    for root, _, filenames in os.walk(collection_data_path, followlinks=True):
-        root_path = Path(root)
-        if not AlbumPathBuilder.of(root_path).valid:
-            continue
-        for filename in filenames:
-            track_path = root_path / filename
-            if track_path.suffix.lower() not in MEDIA_EXTENSIONS:
-                continue
-            if lyrics_text_path_for(track_path).exists():
-                continue
-            missing.append(track_path)
-    missing.sort()
-    logger.info("Found %d track(s) missing lyrics text files", len(missing))
-    for track_path in missing:
-        logger.debug("Missing lyrics text file for: %s", track_path)
-    return missing
+    def album_tracks() -> Iterator[Path]:
+        for root, _, filenames in os.walk(collection_data_path, followlinks=True):
+            root_path = Path(root)
+            if AlbumPathBuilder.of(root_path).valid:
+                yield from (root_path / filename for filename in filenames)
+
+    return find_missing_lyrics(album_tracks())
 
 
 def find_tracks_missing_lyrics_in_directory(album_dir: Path) -> list[Path]:
     """Find media tracks directly in an album directory without lyrics text files."""
-    missing = sorted(
-        track_path
-        for track_path in album_dir.iterdir()
-        if track_path.is_file()
-        and track_path.suffix.lower() in MEDIA_EXTENSIONS
-        and not lyrics_text_path_for(track_path).exists()
-    )
-    logger.info("Found %d track(s) missing lyrics text files", len(missing))
-    for track_path in missing:
-        logger.debug("Missing lyrics text file for: %s", track_path)
-    return missing
+    return find_missing_lyrics(album_dir.iterdir())
 
 
 def process_track(track_path: Path) -> str:
     filename = track_path.name
     lyrics_path = lyrics_text_path_for(track_path)
-    if lyrics_path.exists():
+    if has_lyrics_text(track_path):
         logger.info("[%s] Lyrics text file already exists; skipping lookup", filename)
         return STATUS_SKIPPED
     info = read_track_info(track_path)
@@ -335,9 +320,7 @@ def process_track(track_path: Path) -> str:
 
         logger.debug("[%s] Lyrics found:\n%s", filename, content)
 
-        try:
-            save_lyrics_file(lyrics_path, content + "\n")
-        except FileExistsError:
+        if not save_lyrics_file_if_missing(lyrics_path, content + "\n"):
             logger.info(
                 "[%s] Lyrics text file appeared meanwhile; not overwriting", filename
             )
@@ -389,7 +372,7 @@ def main_loop(
         except (OSError, ValueError) as error:
             logger.error("Could not select track: %s", error)
             return
-        tracks = [] if lyrics_text_path_for(specific_file).exists() else [specific_file]
+        tracks = [] if has_lyrics_text(specific_file) else [specific_file]
         # Explicitly requested files are always looked up
         retry_not_found = True
     elif specific_dir is not None:
@@ -412,8 +395,7 @@ def main_loop(
         return
     if not lookup_enabled:
         logger.info("Lookup disabled; exiting after listing missing lyrics files")
-        for track_path in tracks:
-            logger.info("Missing: %s", lyrics_text_path_for(track_path))
+        log_missing_lyrics_files(tracks)
         return
 
     cache = load_lookup_cache()

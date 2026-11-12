@@ -178,6 +178,43 @@ instead prints the proposed in-memory tags, clearly labeled as unsaved.
 Binary artwork is summarized rather
 than dumped as raw bytes where supported by Mutagen's tag formatter.
 
+### Transcribe text lyrics from local media
+
+`lyrics-text-auto-populate-from-file` creates missing sibling UTF-8 `.txt`
+lyrics files by transcribing the media audio locally with Whisper, using the
+same optional dependencies as the LRC script below. It does not read embedded
+lyrics tags or contact LRCLIB; `lyrics-text-auto-populate` remains the separate
+LRCLIB lookup command.
+
+```bash
+uv sync --extra lyrics
+lyrics-text-auto-populate-from-file                         # collection album tracks
+lyrics-text-auto-populate-from-file --file "/path/to/01 - Track.mp3"
+lyrics-text-auto-populate-from-file --file "/path/to/01 - Track.yml"
+lyrics-text-auto-populate-from-file --dir "/path/to/album"   # non-recursive
+lyrics-text-auto-populate-from-file --transcribe=false      # sorted listing only
+lyrics-text-auto-populate-from-file --cpu --model medium --language en
+python -m mediascripts.lyrics.lyrics_text.lyrics_text_auto_populate_from_file --help
+```
+
+FFmpeg must be on `PATH`. The model loads once per batch (`small` by default);
+weights may download on first use. `--device` selects a PyTorch device, with
+`--cpu` taking precedence. `--language` defaults to `en`. Transcribed segments
+are saved as plain text, one nonempty segment per line, without timestamps.
+Speech recognition can mishear singing or hallucinate lyrics on instrumental
+audio; review generated text before using it for LRC alignment.
+
+Only media tracks without a sibling `.txt` are processed, in random order.
+Existing lyrics, including files created during transcription, are never
+overwritten; LRC files and media files are left untouched. With no target,
+album directories under `$MOONGAS_COLLECTION_ROOTDIR/data` are scanned,
+including library symlinks. `--file` and `--dir` are mutually exclusive.
+Track YAML input resolves to sibling media using the preference order below;
+without media it reports an error. Empty transcription and processing failures
+are logged and return a nonzero exit status while other tracks continue.
+`--lookup=false` aliases `--transcribe=false`; listing and no-work runs do not
+load Whisper. No lookup cache or network pacing options are needed.
+
 ### Generate synchronized LRC lyrics locally
 
 Run `uv sync --extra lyrics` and ensure FFmpeg is on `PATH`. The
@@ -496,6 +533,7 @@ dev:
 lyrics:
   lyrics-lrc-auto-populate
   lyrics-text-auto-populate
+  lyrics-text-auto-populate-from-file
 mediascan_db:
   list-albums
   list-artists
