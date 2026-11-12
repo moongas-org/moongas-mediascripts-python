@@ -2,6 +2,7 @@ import logging
 import sys
 import tomllib
 from dataclasses import dataclass
+from collections.abc import Iterable
 from pathlib import Path
 from subprocess import CalledProcessError
 
@@ -17,18 +18,13 @@ class Segment:
     text: str
 
 
-@dataclass
-class Result:
-    segments: list[Segment]
-
-
 class Model:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def transcribe(self, audio: str, *, language: str) -> Result:
+    def transcribe(self, audio: str, *, language: str) -> tuple[Iterable[Segment], object]:
         self.calls.append((audio, language))
-        return Result([Segment(" First line "), Segment(" "), Segment("Second line")])
+        return iter([Segment(" First line "), Segment(" "), Segment("Second line")]), object()
 
 
 def make_track(directory: Path, name: str = "01 - Track.mp3") -> Path:
@@ -39,15 +35,15 @@ def make_track(directory: Path, name: str = "01 - Track.mp3") -> Path:
 
 
 def install_model(monkeypatch: pytest.MonkeyPatch, model: Model) -> list[tuple[str, str | None]]:
-    loads: list[tuple[str, str | None]] = []
+    loads: list[tuple[str, str, str]] = []
 
     class Whisper:
-        def load_model(self, name: str, *, device: str | None) -> Model:
-            loads.append((name, device))
+        def WhisperModel(self, name: str, *, device: str, compute_type: str) -> Model:
+            loads.append((name, device, compute_type))
             return model
 
     def import_whisper(name: str) -> Whisper:
-        assert name == "stable_whisper"
+        assert name == "faster_whisper"
         return Whisper()
 
     monkeypatch.setattr(text, "import_module", import_whisper)
@@ -66,7 +62,7 @@ def test_file_argument_transcribes_media_or_yaml(
     monkeypatch.setattr(sys, "argv", ["lyrics-text-auto-populate-from-file", "--file", str(target)])
     assert text.main() == 0
     assert model.calls == [(str(track), "en")]
-    assert loads == [("small", None)]
+    assert loads == [("small", "auto", "int8")]
     assert track.with_suffix(".txt").read_text(encoding="utf-8") == "First line\nSecond line\n"
     assert text.main() == 0
     assert len(model.calls) == len(loads) == 1
@@ -108,7 +104,7 @@ def test_batch_loads_once_and_shuffles(
     assert text.main_loop(
         specific_dir=None if collection else album, model_name="medium", language="fr", device="cpu",
     ) == 0
-    assert loads == [("medium", "cpu")]
+    assert loads == [("medium", "cpu", "int8")]
     assert shuffled == [[first, second]]
     assert model.calls == [(str(second), "fr"), (str(first), "fr")]
     assert existing.with_suffix(".txt").read_text() == "existing"
@@ -136,7 +132,7 @@ def test_listing_does_not_import_or_shuffle_and_is_sorted(
     first = make_track(tmp_path, "01 - First.mp3")
 
     def unexpected(*args: object) -> None:
-        pytest.fail("Listing must not load Whisper or shuffle")
+        pytest.fail("Listing must not load faster-whisper or shuffle")
 
     monkeypatch.setattr(text, "import_module", unexpected)
     monkeypatch.setattr(files.random, "shuffle", unexpected)
@@ -170,9 +166,11 @@ def test_concurrent_text_is_not_overwritten(tmp_path: Path) -> None:
     track = make_track(tmp_path)
 
     class RacingModel:
-        def transcribe(self, audio: str, *, language: str) -> Result:
+        def transcribe(
+            self, audio: str, *, language: str,
+        ) -> tuple[Iterable[Segment], object]:
             track.with_suffix(".txt").write_text("created meanwhile")
-            return Result([Segment("new text")])
+            return iter([Segment("new text")]), object()
 
     assert text.process_track(track, RacingModel()) == text.STATUS_SKIPPED
     assert track.with_suffix(".txt").read_text() == "created meanwhile"
@@ -186,14 +184,16 @@ def test_processing_errors_do_not_publish_text(
     track = make_track(tmp_path)
 
     class FailingModel:
-        def transcribe(self, audio: str, *, language: str) -> Result | None:
+        def transcribe(
+            self, audio: str, *, language: str,
+        ) -> tuple[Iterable[Segment], object]:
             if failure == "runtime":
                 raise RuntimeError("Transcription failed")
             if failure == "ffmpeg":
                 raise CalledProcessError(1, ["ffmpeg"])
             if failure == "none":
-                return None
-            return Result([Segment(" " if failure == "empty" else "Lyrics")])
+                return iter([]), object()
+            return iter([Segment(" " if failure == "empty" else "Lyrics")]), object()
 
     if failure == "write":
         def fail_link(source: Path, destination: Path) -> None:
@@ -210,7 +210,9 @@ def test_batch_continues_after_error_and_returns_failure(tmp_path: Path, monkeyp
     good = make_track(tmp_path, "02 - Good.mp3")
 
     class MixedModel(Model):
-        def transcribe(self, audio: str, *, language: str) -> Result:
+        def transcribe(
+            self, audio: str, *, language: str,
+        ) -> tuple[Iterable[Segment], object]:
             if audio == str(bad):
                 raise RuntimeError("Bad audio")
             return super().transcribe(audio, language=language)
@@ -228,12 +230,12 @@ def test_setup_failure_is_reported(
     track = make_track(tmp_path)
 
     class Whisper:
-        def load_model(self, name: str, *, device: str | None) -> Model:
+        def WhisperModel(self, name: str, *, device: str, compute_type: str) -> Model:
             raise RuntimeError("Model could not load")
 
     def load(name: str) -> Whisper:
         if failure == "import":
-            raise ImportError("stable_whisper is not installed")
+            raise ImportError("faster_whisper is not installed")
         return Whisper()
 
     monkeypatch.setattr(text, "import_module", load)
@@ -261,7 +263,7 @@ def test_invalid_targets_fail(
 
 def test_no_work_does_not_load_whisper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def unexpected(name: str) -> None:
-        pytest.fail("No-work run must not load Whisper")
+        pytest.fail("No-work run must not load faster-whisper")
 
     monkeypatch.setattr(text, "import_module", unexpected)
     assert text.main_loop(specific_dir=tmp_path) == 0
@@ -283,7 +285,7 @@ def test_cli_model_options(
         "--model", "medium", "--language", "fr", *options,
     ])
     assert text.main() == 0
-    assert loads == [("medium", device)]
+    assert loads == [("medium", device or "auto", "int8")]
     assert model.calls == [(str(track), "fr")]
 
 

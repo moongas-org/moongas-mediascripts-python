@@ -196,6 +196,18 @@ def lrclib_request(endpoint: str, params: dict[str, Any]) -> Any:
         raise
 
 
+def reset_request_timing(initial_delay: float) -> None:
+    global _request_delay_seconds, _retry_after_seconds
+    _request_delay_seconds = initial_delay
+    _retry_after_seconds = 0.0
+
+
+def wait_before_request() -> None:
+    global _retry_after_seconds
+    time.sleep(max(_request_delay_seconds, _retry_after_seconds))
+    _retry_after_seconds = 0.0
+
+
 def durations_match(record: dict[str, Any], info: TrackInfo) -> bool:
     if info.duration is None or not record.get("duration"):
         return True
@@ -360,9 +372,7 @@ def main_loop(
     retry_not_found: bool = False,
     specific_dir: Optional[Path] = None,
 ):
-    global _request_delay_seconds, _retry_after_seconds
-    _request_delay_seconds = sleep_between_requests
-    _retry_after_seconds = 0.0
+    reset_request_timing(sleep_between_requests)
     collection_data_path = Path(MOONGAS_COLLECTION_ROOTDIR) / "data"
     logger.info("Collection data directory: %s", collection_data_path.resolve())
 
@@ -416,8 +426,7 @@ def main_loop(
         while queue:
             track_path = queue.popleft()
             if attempts:
-                time.sleep(max(_request_delay_seconds, _retry_after_seconds))
-                _retry_after_seconds = 0.0
+                wait_before_request()
             attempts[track_path] += 1
             logger.info(
                 "[%s] Attempt %d/%d (%d other track(s) pending)",

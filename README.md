@@ -62,7 +62,8 @@ uv sync --extra dev --extra llm --extra stats
 - `[dev]` - development dependencies (includes `pytest` and `ruff`)
 - `[stats]` - statistics script dependencies (includes `matplotlib` and `numpy`)
 - `[essentia]` - Essentia audio feature extraction (`uv sync --extra essentia`)
-- `[lyrics]` - local lyrics alignment using `stable-ts` / `stable_whisper` (`uv sync --extra lyrics`)
+- `[lyrics]` - local lyrics transcription using faster-whisper with int8 quantization (`uv sync --extra lyrics`)
+- `[lyrics-align]` - optional forced alignment of supplied `.txt` lyrics for Python <3.14 (`uv sync --extra lyrics-align`)
 
 # Usage
 
@@ -178,13 +179,30 @@ instead prints the proposed in-memory tags, clearly labeled as unsaved.
 Binary artwork is summarized rather
 than dumped as raw bytes where supported by Mutagen's tag formatter.
 
-### Transcribe text lyrics from local media
+### Populate text lyrics from LRCLIB with local transcription fallback
 
-`lyrics-text-auto-populate-from-file` creates missing sibling UTF-8 `.txt`
-lyrics files by transcribing the media audio locally with Whisper, using the
-same optional dependencies as the LRC script below. It does not read embedded
-lyrics tags or contact LRCLIB; `lyrics-text-auto-populate` remains the separate
-LRCLIB lookup command.
+`lyrics-text-auto-populate` first looks up each missing `.txt` lyrics file via
+LRCLIB, then falls back to local faster-whisper transcription if no lyrics are
+available. faster-whisper uses int8 quantization. Existing lyrics files are
+never overwritten.
+
+```bash
+uv sync --extra lyrics
+lyrics-text-auto-populate                                  # LRCLIB, then local fallback
+lyrics-text-auto-populate --lookup=false                   # local transcription only
+lyrics-text-auto-populate --transcribe=false               # LRCLIB only
+lyrics-text-auto-populate --file "/path/to/01 - Track.mp3"
+lyrics-text-auto-populate --dir "/path/to/album" --sleep 1
+lyrics-text-auto-populate --retry-not-found --model medium --language en --cpu
+```
+
+`--lookup=false` disables LRCLIB; `--transcribe=false` disables the local
+fallback. Using both false lists missing lyrics files without doing lookups or
+loading a model. Cached LRCLIB misses skip repeat requests but still proceed to
+local transcription. Transcription failures are counted as errors while the
+batch continues. Model weights may download on first use.
+
+The local-transcription-only command is also available:
 
 ```bash
 uv sync --extra lyrics
@@ -197,9 +215,9 @@ lyrics-text-auto-populate-from-file --cpu --model medium --language en
 python -m mediascripts.lyrics.lyrics_text.lyrics_text_auto_populate_from_file --help
 ```
 
-FFmpeg must be on `PATH`. The model loads once per batch (`small` by default);
-weights may download on first use. `--device` selects a PyTorch device, with
-`--cpu` taking precedence. `--language` defaults to `en`. Transcribed segments
+The model loads once per batch (`small` by default) with int8 quantization;
+weights may download on first use. `--device` selects a faster-whisper device,
+with `--cpu` taking precedence. `--language` defaults to `en`. Transcribed segments
 are saved as plain text, one nonempty segment per line, without timestamps.
 Speech recognition can mishear singing or hallucinate lyrics on instrumental
 audio; review generated text before using it for LRC alignment.
@@ -213,15 +231,16 @@ Track YAML input resolves to sibling media using the preference order below;
 without media it reports an error. Empty transcription and processing failures
 are logged and return a nonzero exit status while other tracks continue.
 `--lookup=false` aliases `--transcribe=false`; listing and no-work runs do not
-load Whisper. No lookup cache or network pacing options are needed.
+load faster-whisper. No lookup cache or network pacing options are needed for
+this standalone transcription command.
 
 ### Generate synchronized LRC lyrics locally
 
-Run `uv sync --extra lyrics` and ensure FFmpeg is on `PATH`. The
-`stable-ts` package provides `stable_whisper` and uses OpenAI Whisper locally;
-no lyrics lookup service or OpenAI API key is used. Model weights may download
-on first use; subsequent runs can use the cached weights offline. Install a
-GPU-enabled PyTorch build separately if needed for your hardware.
+Run `uv sync --extra lyrics`. By default, LRC files are generated from
+faster-whisper transcription segments, using int8 quantization and timestamps
+from the recognized audio. Model weights may download on first use; subsequent
+runs can use the cached weights offline. No system FFmpeg, lyrics lookup
+service, or OpenAI API key is needed for this default mode.
 
 ```bash
 lyrics-lrc-auto-populate                          # eligible collection album tracks
@@ -231,12 +250,18 @@ lyrics-lrc-auto-populate --dir "/path/to/album"    # this directory only
 lyrics-lrc-auto-populate --align=false            # list eligible tracks, without loading a model
 lyrics-lrc-auto-populate --cpu                    # force CPU mode instead of CUDA
 lyrics-lrc-auto-populate --dir "/path/to/album" --model medium --language en --device cpu
+uv sync --extra lyrics-align
+lyrics-lrc-auto-populate --use-lyrics-txt          # force-align existing .txt lyrics instead
 python -m mediascripts.lyrics.lyrics_lrc.lyrics_lrc_auto_populate --help
 ```
 
-Only existing media tracks with a same-basename UTF-8 `.txt` lyrics file and
-no `.lrc` file are eligible. Text lyrics and existing LRC files are never
-overwritten, even if an LRC appears during alignment. The default target is
+By default, media tracks without an existing `.lrc` are transcribed and their
+recognized segments are timestamped. Existing `.lrc` files are never
+overwritten. The optional `--use-lyrics-txt` mode instead requires a sibling
+UTF-8 `.txt` file and force-aligns its lines with WhisperX; install the
+`lyrics-align` extra and system FFmpeg for this mode. WhisperX currently
+supports Python versions below 3.14. Existing text lyrics remain untouched.
+The default target is
 album directories under `$MOONGAS_COLLECTION_ROOTDIR/data` (including library
 symlinks), with the same fallback root as `lyrics-text-auto-populate`.
 `--file` and `--dir` are mutually exclusive.
@@ -260,15 +285,15 @@ Eligible tracks are processed once per run in random order, using the same
 shared file-shuffling helper as track YAML auto-population. Listing mode
 (`--align=false`) keeps sorted order, and `--file` still selects only one track.
 
-The model is loaded once per batch (`small` by default); `--model` also accepts
-a local checkpoint path. `--language` defaults to `en` and should match the
-lyrics; `--device` defaults to automatic device selection. `--cpu` forces CPU
-mode and overrides `--device` if both are supplied. Original lyrics
-line breaks are preserved, with one `[mm:ss.xx]` timestamp per aligned line.
-Stable-ts does not provide `to_lrc()`, so the script formats its aligned segment
-start times as LRC. Empty text, failed alignment, and write failures are logged,
-do not leave a partial LRC, and produce a nonzero exit status; other tracks
-continue processing.
+In default mode, the faster-whisper model is loaded once per batch (`small` by
+default); `--model` also accepts a local checkpoint path. `--language` defaults
+to `en`; `--device` defaults to automatic device selection, and `--cpu` forces
+CPU mode. The script writes one timestamped LRC line per recognized segment.
+With `--use-lyrics-txt`, WhisperX aligns the existing text and preserves its
+line breaks with one `[mm:ss.xx]` timestamp per line; the alignment model uses
+the selected language and device. Empty text, failed transcription or
+alignment, and write failures are logged, do not leave a partial LRC, and
+produce a nonzero exit status; other tracks continue processing.
 
 `--lookup=false` is an alias for `--align=false`, for compatibility with the
 text-lyrics script's listing mode. Network pacing (`--sleep`) and lookup-cache

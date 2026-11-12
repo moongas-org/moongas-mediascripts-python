@@ -4,7 +4,7 @@ Run lyrics-text-auto-populate-from-file with --file, --dir, or no target for
 collection album directories under $MOONGAS_COLLECTION_ROOTDIR/data.
 --dir is non-recursive; --file also accepts track YAML with sibling media.
 Use --transcribe=false (or --lookup=false) to list missing files without loading
-Whisper. Install the optional [lyrics] dependencies and FFmpeg for transcription.
+faster-whisper. Install the optional [lyrics] dependencies for transcription.
 Model weights may download on first use; transcription itself runs locally.
 Existing text lyrics are never overwritten. LRC files and embedded tags are
 not used; speech recognition may be inaccurate for singing or instrumental audio.
@@ -13,7 +13,7 @@ not used; speech recognition may be inaccurate for singing or instrumental audio
 import argparse
 import logging
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable
 from importlib import import_module
 from pathlib import Path
 from subprocess import SubprocessError
@@ -47,20 +47,22 @@ logger = logging.getLogger(__name__)
 
 class TranscribedSegment(Protocol):
     @property
+    def start(self) -> float: ...
+
+    @property
     def text(self) -> str: ...
 
 
-class TranscriptionResult(Protocol):
-    @property
-    def segments(self) -> Sequence[TranscribedSegment]: ...
-
-
 class TranscriptionModel(Protocol):
-    def transcribe(self, audio: str, *, language: str) -> TranscriptionResult | None: ...
+    def transcribe(
+        self, audio: str, *, language: str,
+    ) -> tuple[Iterable[TranscribedSegment], object]: ...
 
 
-class StableWhisper(Protocol):
-    def load_model(self, name: str, *, device: str | None) -> TranscriptionModel: ...
+class FasterWhisper(Protocol):
+    def WhisperModel(
+        self, model_size_or_path: str, *, device: str, compute_type: str,
+    ) -> TranscriptionModel: ...
 
 
 def find_tracks_missing_lyrics(path: Path, collection: bool = False) -> list[Path]:
@@ -68,8 +70,8 @@ def find_tracks_missing_lyrics(path: Path, collection: bool = False) -> list[Pat
     return find_missing_lyrics(candidates)
 
 
-def format_lyrics(result: TranscriptionResult) -> str:
-    lines = [segment.text.strip() for segment in result.segments if segment.text.strip()]
+def format_lyrics(segments: Iterable[TranscribedSegment]) -> str:
+    lines = [segment.text.strip() for segment in segments if segment.text.strip()]
     if not lines:
         raise ValueError("Transcription returned no lyrics text")
     return "\n".join(lines) + "\n"
@@ -82,10 +84,8 @@ def process_track(track_path: Path, model: TranscriptionModel, language: str = "
     lyrics_path = lyrics_text_path_for(track_path)
     try:
         logger.info("[%s] Transcribing audio locally (language=%s)", track_path, language)
-        result = model.transcribe(str(track_path), language=language)
-        if result is None:
-            raise ValueError("Transcription failed to produce a result")
-        content = format_lyrics(result)
+        segments, _ = model.transcribe(str(track_path), language=language)
+        content = format_lyrics(segments)
         if not save_lyrics_file_if_missing(lyrics_path, content):
             logger.info("[%s] Lyrics text file appeared meanwhile; not overwriting", track_path)
             return STATUS_SKIPPED
@@ -132,15 +132,17 @@ def main_loop(
         return 0
 
     try:
-        stable_whisper = cast(StableWhisper, import_module("stable_whisper"))
+        faster_whisper = cast(FasterWhisper, import_module("faster_whisper"))
     except ImportError:
-        logger.exception("Could not import stable_whisper; install with pip install 'mediascripts[lyrics]'")
+        logger.exception("Could not import faster_whisper; install with pip install 'mediascripts[lyrics]'")
         return 1
     try:
-        logger.info("Loading Whisper model %s (device=%s)", model_name, device or "auto")
-        model = stable_whisper.load_model(model_name, device=device)
+        logger.info("Loading faster-whisper model %s (device=%s, compute_type=int8)", model_name, device or "auto")
+        model = faster_whisper.WhisperModel(
+            model_name, device=device or "auto", compute_type="int8",
+        )
     except (OSError, RuntimeError, ValueError):
-        logger.exception("Could not load Whisper model %s", model_name)
+        logger.exception("Could not load faster-whisper model %s", model_name)
         return 1
 
     statuses: Counter[str] = Counter()
@@ -155,7 +157,7 @@ def main_loop(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Populate missing lyrics text files by transcribing local media using stable-ts."
+        description="Populate missing lyrics text files by transcribing local media using faster-whisper."
     )
     targets = parser.add_mutually_exclusive_group()
     targets.add_argument(
@@ -166,9 +168,9 @@ def main() -> int:
         "--transcribe", "--lookup", dest="transcribe_enabled", type=parse_boolean, default=True,
         metavar="true|false", help="Enable local transcription (default: true); false only lists eligible tracks.",
     )
-    parser.add_argument("--model", default="small", help="Whisper model name or checkpoint path (default: small).")
+    parser.add_argument("--model", default="small", help="faster-whisper model name or checkpoint path (default: small).")
     parser.add_argument("--language", default="en", help="Lyrics language code (default: en).")
-    parser.add_argument("--device", help="PyTorch device, e.g. cpu or cuda (default: auto).")
+    parser.add_argument("--device", help="faster-whisper device, e.g. cpu or cuda (default: auto).")
     parser.add_argument("--cpu", action="store_true", help="Force CPU mode, overriding --device.")
     args = parser.parse_args()
     try:

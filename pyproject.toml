@@ -89,7 +89,10 @@ rename-album-files = "mediascripts.rename.rename_album_files:main"
 
 [project.optional-dependencies]
 lyrics = [
-  "stable-ts>=2.19.1",
+  "faster-whisper>=1.2.1",
+]
+lyrics-align = [
+  "whisperx>=3.7.4,<3.8; python_version < '3.14'",
 ]
 essentia = [
   "essentia",
