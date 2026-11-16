@@ -40,8 +40,9 @@ class TextWriter(Protocol):
 
 def save_yaml_atomically(
     yaml_path: Path, write: Callable[[TextWriter], None], backup_path: Path | None = None,
+    *, create_only: bool = False,
 ) -> None:
-    """Stage YAML beside its source, preserve permissions, and replace atomically."""
+    """Stage YAML atomically; optionally create a new file without overwriting."""
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -50,10 +51,13 @@ def save_yaml_atomically(
         ) as stream:
             temporary_path = Path(stream.name)
             write(stream)
-        temporary_path.chmod(stat.S_IMODE(yaml_path.stat().st_mode))
-        if backup_path is not None:
-            shutil.copy2(yaml_path, backup_path)
-        os.replace(temporary_path, yaml_path)
+        if create_only:
+            os.link(temporary_path, yaml_path)
+        else:
+            temporary_path.chmod(stat.S_IMODE(yaml_path.stat().st_mode))
+            if backup_path is not None:
+                shutil.copy2(yaml_path, backup_path)
+            os.replace(temporary_path, yaml_path)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

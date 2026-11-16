@@ -719,6 +719,102 @@ cannot establish that a suggested streaming identifier belongs to the recording.
 Exit status is 0 on success, 1 for errors, or 130 if interrupted.
 Also runs as `python -m mediascripts.track.track_yaml.track_yaml_auto_populate`.
 
+## Create Track YAML from a Request File
+
+`track-yaml-auto-populate-from-file` reads a UTF-8 text file in order, ignoring
+blank lines. `--file` defaults to `$MOONGAS_COLLECTION_ROOTDIR/todo.txt`;
+specify `--file` to use another input file. Each non-empty line describes one
+desired track or album, for example:
+
+```text
+Nirvana - Come As You Are (track)
+Portishead - Dummy (album)
+```
+
+Install the LLM extras (`uv sync --extra llm`) and configure the same
+`LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` settings described above.
+Existing GitHub Models environment-variable fallbacks also apply.
+
+```bash
+track-yaml-auto-populate-from-file
+track-yaml-auto-populate-from-file --file "/home/brett/Git/moongas.org/moongas-collection-local/todo.txt"
+track-yaml-auto-populate-from-file --file "/path/to/todo.txt" --dry-run
+track-yaml-auto-populate-from-file --file "/path/to/todo.txt" --dir "/path/to/Music" --count 10 --sleep 5
+track-yaml-auto-populate-from-file --file "/path/to/todo.txt" --llm=false
+track-yaml-auto-populate-from-file --file "/path/to/todo.txt" --force
+```
+
+The default destination is the first `mediaDirs` entry in
+`$MOONGAS_COLLECTION_ROOTDIR/mediascan-config.yml`, interpreted relative to the
+collection root even when it begins with `/`. For example, `mediaDirs: [/data/Music,
+/data/MusicOther]` selects `$MOONGAS_COLLECTION_ROOTDIR/data/Music`.
+A missing config or missing, empty, or invalid first entry is an error; there is
+no hard-coded directory fallback. `-d` / `--dir` overrides the parent directory
+for artist directories without requiring the config or collection-root variable.
+The command creates
+missing artist and album directories, using the release's album artist for the
+artist directory (including compilations). Output follows mediascan's album
+naming convention, for example `Artist/Album [1995]/01 - Track.yml`.
+Multi-disc releases use `01.01 - Track.yml`. Unsupported filename characters
+are replaced with underscores; original metadata spelling is retained inside YAML.
+Existing artist/album YAML files are left untouched; no audio is downloaded.
+
+The OpenAI-compatible LLM interprets each line, then selects a recording and
+release from live MusicBrainz search results. Selected IDs must exist in those
+results, and a requested track must occur on the selected release. Album requests
+expand into every track on the selected release, not just its title track.
+Track titles, artist credits, album titles, years and disc/track positions come
+from MusicBrainz; genre is supplied by the LLM. Requests without a convincing
+match, known genre, release year, or complete tracklist are reported as errors
+rather than creating placeholders. Model selections and genres still need human
+review. Requests not catalogued in MusicBrainz cannot currently be imported.
+No streaming IDs, fingerprints, or local-media data are invented.
+
+Every proposed track passes the mediascan `TrackYamlFile` validator before
+writing. Existing `.yml` or `.yaml` files are skipped by default. `--force`
+refreshes their six core fields while retaining streaming identifiers and
+`mediaFileData`, and saves the original as `.yml.bak` or `.yaml.bak`.
+Ambiguous duplicate `.yml`/`.yaml` paths, symlink output files, and directory
+symlinks leading outside the destination are rejected. New files are published
+atomically without overwriting files that appear during processing.
+
+`-n` / `--dry-run` performs the lookups and shows unified diffs, but creates no
+directories, YAML files, or backups. `--llm=false` only lists input requests;
+it makes no LLM or MusicBrainz calls and changes nothing.
+`-c` / `--count` limits non-empty input lines, including failed attempts;
+`--count 0` makes no requests. `--sleep` defaults to 30 seconds between lines.
+MusicBrainz calls are additionally paced at just over one second apart.
+Lines are not shuffled. Before lookups in a normal run, the command atomically
+copies the input to a sibling `.bak` file (for example `todo.txt.bak`), replacing
+the previous run's backup. After successfully handling all track files for a
+line, it atomically removes that particular line from the input. Existing track
+files skipped without `--force` also count as successfully handled.
+Failed, unprocessed, and blank lines remain, preserving their order, whitespace,
+line endings, and UTF-8 BOM if present. Each failed line is logged with its
+original source line number, and later lines are still attempted. Progress is
+saved after each successful line so an interruption leaves pending work intact.
+`--dry-run`, `--llm=false`, and `--count 0` leave both the input and its backup
+untouched. Backup failures prevent processing; input-update failures or detected
+input edits abort the batch rather than discarding pending work. Do not edit the
+input or run concurrent writers while processing. Symlink input/backup files are
+rejected for normal runs.
+INFO logging includes resolved input/config/destination paths, run options,
+LLM request and MusicBrainz response timings, interpreted requests, candidate
+counts, selected release/recording IDs, directory creation, file saves/skips,
+backup locations, and per-line completion. File summaries distinguish created,
+updated, skipped, unchanged and dry-run previewed files; the final batch summary
+reports completed, failed and lookup-disabled lines with elapsed time.
+Use `LOG_LEVEL=DEBUG` for model/catalogue response bodies, validated YAML,
+filename sanitization, blank-line and rate-limit details, and error tracebacks.
+Debug logs can contain input and music metadata; review them before sharing.
+Credentials and authorization headers are not logged by this script.
+Exit status is 0 on success, 1 if any line fails, or 130 if interrupted.
+Lookups send each request to the configured LLM provider and artist/title
+searches to MusicBrainz; dry runs still make these requests and may incur
+provider charges.
+Also runs as
+`python -m mediascripts.track.track_yaml.track_yaml_auto_populate_from_file`.
+
 ## Compare Track YAML with MP3 Tags
 
 With `MOONGAS_COLLECTION_ROOTDIR` set, run:
