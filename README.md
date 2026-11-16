@@ -760,7 +760,11 @@ are replaced with underscores; original metadata spelling is retained inside YAM
 Existing artist/album YAML files are left untouched; no audio is downloaded.
 
 The OpenAI-compatible LLM interprets each line, then selects a recording and
-release from live MusicBrainz search results. Selected IDs must exist in those
+release from live MusicBrainz search results. If the exact artist/title query
+returns no candidates, it tries accent-normalized, fuzzy word searches with the
+artist filter, then without it. Each strategy returns at most ten candidates;
+the LLM must still reject unrelated artists, recordings and editions.
+Selected IDs must exist in those
 results, and a requested track must occur on the selected release. Album requests
 expand into every track on the selected release, not just its title track.
 Track titles, artist credits, album titles, years and disc/track positions come
@@ -769,6 +773,9 @@ match, known genre, release year, or complete tracklist are reported as errors
 rather than creating placeholders. Model selections and genres still need human
 review. Requests not catalogued in MusicBrainz cannot currently be imported.
 No streaming IDs, fingerprints, or local-media data are invented.
+Responses wrapped in a single YAML markdown code fence are unwrapped before
+strict YAML parsing; surrounding prose, multiple blocks, and invalid YAML remain
+errors.
 
 Every proposed track passes the mediascan `TrackYamlFile` validator before
 writing. Existing `.yml` or `.yaml` files are skipped by default. `--force`
@@ -784,6 +791,12 @@ it makes no LLM or MusicBrainz calls and changes nothing.
 `-c` / `--count` limits non-empty input lines, including failed attempts;
 `--count 0` makes no requests. `--sleep` defaults to 30 seconds between lines.
 MusicBrainz calls are additionally paced at just over one second apart.
+Temporary HTTP 429/500/502/503/504 responses and connection/timeout failures are
+retried up to four total attempts per catalogue request, with 2/4/8-second
+backoff. A valid `Retry-After` header (seconds or HTTP date) overrides that
+backoff, capped at 120 seconds; ordinary rate-limit pacing still applies.
+Other HTTP errors and malformed catalogue responses fail without retries.
+Search strategies, failed attempts, and retry delays are logged explicitly.
 Lines are not shuffled. Before lookups in a normal run, the command atomically
 copies the input to a sibling `.bak` file (for example `todo.txt.bak`), replacing
 the previous run's backup. After successfully handling all track files for a
