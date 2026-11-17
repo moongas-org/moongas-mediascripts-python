@@ -3,9 +3,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
+from mediascan.types.mediafile.mediafile_data import MediaFileData
+from mediascan.types.track.track_yaml_file_validator import MEDIAFILE_FIELDS, validate_track_yaml_content
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3, COMM
 
@@ -131,8 +134,13 @@ def test_accept_either_source_for_each_field(
     assert len(document["mediaFileData"]) == 1
     media_file = document["mediaFileData"][0]
     assert media_file["path"] == str(track)
-    assert media_file["albumPath"] == str(track.parent)
-    assert media_file["artistPath"] == str(track.parent.parent)
+    assert set(media_file) <= MEDIAFILE_FIELDS
+    assert "albumPath" not in media_file
+    assert "artistPath" not in media_file
+    assert MediaFileData.from_yaml(yaml.safe_dump(media_file)).path == str(track)
+    validate_track_yaml_content(yaml.safe_dump({
+        "trackData": document["trackData"], "mediaFileData": [media_file],
+    }))
     assert media_file["size"] == track.stat().st_size
     assert media_file["format"] == "mp3"
     expected_media_values = {
@@ -298,6 +306,8 @@ def test_existing_media_file_data_is_completed_without_overwriting_values(
             "mediaFileData:\n"
             "  - path: preserved-path.mp3\n"
             "    format: preserved-format\n"
+            "    albumPath: obsolete album\n"
+            "    artistPath: obsolete artist\n"
             "    fpcalcData:\n"
             "      fingerprint: preserved-fingerprint\n"
             "customField: keep-this-too\n",
@@ -314,9 +324,49 @@ def test_existing_media_file_data_is_completed_without_overwriting_values(
     assert media_file["path"] == "preserved-path.mp3"
     assert media_file["format"] == "preserved-format"
     assert media_file["fpcalcData"]["fingerprint"] == "preserved-fingerprint"
-    assert media_file["albumPath"] == str(track.parent)
-    assert media_file["artistPath"] == str(track.parent.parent)
+    assert "albumPath" not in media_file
+    assert "artistPath" not in media_file
     assert media_file["size"] == track.stat().st_size
+
+
+def test_obsolete_fields_removed_without_other_missing_values(
+    track: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("Unexpected prompt"))
+    assert merge.merge_track(track, quiet=True)
+    yaml_path = track.with_suffix(".yml")
+    original = yaml_path.read_text(encoding="utf-8")
+    yaml_path.write_text(original.replace("  - path:", "  - albumPath: stale\n    artistPath: stale\n    path:"))
+    assert merge.merge_track(track, quiet=True)
+    result = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))["mediaFileData"][0]
+    assert "albumPath" not in result and "artistPath" not in result
+    before = yaml_path.read_bytes()
+    assert merge.merge_track(track, quiet=True)
+    assert yaml_path.read_bytes() == before
+
+
+def test_duration_uses_media_file_data_and_preserves_existing_snake_case(
+    track: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    yaml_path = track.with_suffix(".yml")
+    original = yaml_path.read_text(encoding="utf-8")
+    yaml_path.write_text(original.replace(
+        "customField: keep-this-too\n",
+        "media_file_data:\n"
+        "  - mod_time: 2000-01-01T00:00:00Z\n"
+        "    album_path: stale\n"
+        "    artist_path: stale\n"
+        "customField: keep-this-too\n",
+    ))
+    audio = MagicMock()
+    audio.info.length = 123.5
+    monkeypatch.setattr(merge.mutagen, "File", lambda _path: audio)
+    assert merge.merge_track(track, quiet=True)
+    data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))["media_file_data"][0]
+    assert data["duration"] == 123.5
+    assert data["mod_time"].year == 2000
+    assert "modTime" not in data
+    assert "album_path" not in data and "artist_path" not in data
 
 
 def test_multiple_media_file_entries_are_rejected_without_data_loss(

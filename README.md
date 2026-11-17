@@ -925,6 +925,9 @@ accepting the YAML year replaces the ID3 date with that year.
 
 Each accepted field is saved immediately. Unrelated media tags and YAML fields,
 comments, and quoted strings are preserved using round-trip YAML support.
+The merge also fills missing `mediaFileData` values using the mediascan
+`MediaFileData` model, preserving existing values and fingerprint/AcoustID data.
+Obsolete `albumPath` and `artistPath` fields are removed from that entry.
 YAML updates use a temporary file and atomic replacement. `--quiet` suppresses
 matching tracks, not conflict prompts or errors. Ctrl+C or end-of-input stops
 the run, preserving previously accepted changes.

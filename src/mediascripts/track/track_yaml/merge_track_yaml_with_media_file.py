@@ -16,6 +16,7 @@ import logging
 import re
 import sys
 from collections.abc import Mapping, MutableMapping
+from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, cast
@@ -26,6 +27,8 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from mediascan.types.track.track_data import TrackData
+from mediascan.types.mediafile.mediafile_data import MediaFileData
+from mediascan.types.track.track_yaml_file_validator import camel_case
 from mediascripts.track.track_yaml.track_yaml_common import (
     TAG_FIELDS,
     TRACK_ERRORS,
@@ -140,20 +143,18 @@ def add_missing_media_file_data(
         document[key] = entries
 
     file_stat = track_path.stat()
-    metadata_values: dict[str, object] = {
-        "path": str(track_path),
-        "albumPath": str(track_path.parent),
-        "artistPath": str(track_path.parent.parent),
-        "size": file_stat.st_size,
-        "format": track_path.suffix.lstrip(".").lower(),
-        "title": next(iter(tags.get("title", [])), track_data.title),
-        "artist": next(iter(tags.get("artist", [])), track_data.artist),
-        "albumartist": next(iter(tags.get("albumartist", [])), track_data.albumartist),
-        "album": next(iter(tags.get("album", [])), track_data.album),
-        "genre": next(iter(tags.get("genre", [])), track_data.genre),
-        "year": _tag_year(next(iter(tags.get("date", [])), str(track_data.year)), track_data.year),
-        "modTime": datetime.fromtimestamp(file_stat.st_mtime, timezone.utc),
-    }
+    metadata = MediaFileData(
+        path=str(track_path),
+        size=file_stat.st_size,
+        format=track_path.suffix.lstrip(".").lower(),
+        title=next(iter(tags.get("title", [])), track_data.title),
+        artist=next(iter(tags.get("artist", [])), track_data.artist),
+        albumartist=next(iter(tags.get("albumartist", [])), track_data.albumartist),
+        album=next(iter(tags.get("album", [])), track_data.album),
+        genre=next(iter(tags.get("genre", [])), track_data.genre),
+        year=_tag_year(next(iter(tags.get("date", [])), str(track_data.year)), track_data.year),
+        mod_time=datetime.fromtimestamp(file_stat.st_mtime, timezone.utc),
+    )
     if media_file.get("duration") is None:
         try:
             audio = cast(_Audio | None, mutagen.File(track_path))
@@ -161,12 +162,18 @@ def add_missing_media_file_data(
             logger.warning("[%s] Could not read media duration: %s", track_path, error)
             audio = None
         if audio is not None:
-            metadata_values["duration"] = audio.info.length
+            metadata.duration = audio.info.length
 
     changed = False
-    for field, value in metadata_values.items():
-        if media_file.get(field) is None:
-            media_file[field] = value
+    for obsolete in ("albumPath", "artistPath", "album_path", "artist_path"):
+        if obsolete in media_file:
+            del media_file[obsolete]
+            changed = True
+    for field in fields(metadata):
+        value: object = getattr(metadata, field.name)
+        key = camel_case(field.name)
+        if value is not None and media_file.get(key) is None and media_file.get(field.name) is None:
+            media_file[key] = value
             changed = True
 
     if changed:
