@@ -23,7 +23,6 @@ from typing import Protocol, cast
 
 import mutagen
 import readchar
-from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from mediascan.types.track.track_data import TrackData
@@ -37,6 +36,7 @@ from mediascripts.track.track_yaml.track_yaml_common import (
     load_track_metadata,
     run_cli,
     save_yaml_atomically,
+    track_yaml,
     track_field_values,
 )
 
@@ -99,8 +99,7 @@ def prompt_custom_value(field: str) -> str:
 
 def save_yaml_value(yaml_path: Path, field: str, value: str | int) -> None:
     """Round-trip YAML through a sibling temporary file to avoid partial writes."""
-    yaml = YAML()
-    yaml.preserve_quotes = True
+    yaml = track_yaml(preserve_quotes=True)
     round_trip_yaml = cast(_RoundTripYaml, yaml)
     document = cast(MutableMapping[str, object], round_trip_yaml.load(yaml_path))
     data = document.get("trackData", document.get("track_data"))
@@ -117,8 +116,7 @@ def add_missing_media_file_data(
     tags: Mapping[str, list[str]],
 ) -> bool:
     """Fill absent media-file metadata while preserving existing YAML values."""
-    yaml = YAML()
-    yaml.preserve_quotes = True
+    yaml = track_yaml(preserve_quotes=True)
     round_trip_yaml = cast(_RoundTripYaml, yaml)
     document = cast(MutableMapping[str, object], round_trip_yaml.load(yaml_path))
     key = "media_file_data" if "media_file_data" in document and "mediaFileData" not in document else "mediaFileData"

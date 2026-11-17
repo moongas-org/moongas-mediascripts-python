@@ -13,13 +13,11 @@ from io import StringIO
 from pathlib import Path
 from typing import Protocol, cast
 
-from ruamel.yaml import YAML
-
 from mediascripts.acoustid.acoustid import YAML_ERRORS, track_files
 from mediascripts.acoustid.recording_yaml import is_list, is_mapping
 from mediascripts.spotify.client import MIN_SLEEP, SpotifyClient, search_url
 from mediascripts.spotify.track_yaml import has_spotify_data, identifier_entries, store_spotify_data
-from mediascripts.track.track_yaml.track_yaml_common import TextWriter, save_yaml_atomically
+from mediascripts.track.track_yaml.track_yaml_common import TextWriter, save_yaml_atomically, track_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +59,7 @@ def run(
             break
         try:
             original = path.read_text(encoding="utf-8")
-            yaml = cast(_Yaml, YAML())
+            yaml = cast(_Yaml, track_yaml())
             document = yaml.load(original)
             if not is_mapping(document) or not is_mapping(document.get("trackData")):
                 if specific_file is not None:

@@ -22,14 +22,14 @@ def test_exclusions_preserve_substring_and_case_rules(path: str, expected: bool)
     assert common.excluded(Path(path)) is expected
 
 
-def test_discovery_and_reference_examples_keep_letter_filtering(tmp_path: Path) -> None:
+def test_discovery_and_reference_examples_use_glob_filtering(tmp_path: Path) -> None:
     for artist in ("Alpha", "Beta"):
         path = tmp_path / "Music" / artist / "artist.yml"
         path.parent.mkdir(parents=True)
         path.write_text(artist, encoding="utf-8")
     alpha = tmp_path / "Music" / "Alpha" / "artist.yml"
-    assert common.load_input_files(tmp_path, ["A"]) == [alpha]
-    assert common.load_reference_examples(tmp_path, ["A"]) == "Example: Music/Alpha/artist.yml\nAlpha"
+    assert common.load_input_files(tmp_path, "A*") == [alpha]
+    assert common.load_reference_examples(tmp_path, "A*") == "Example: Music/Alpha/artist.yml\nAlpha"
     assert populate.load_input_files is common.load_input_files
     assert populate.load_reference_examples is common.load_reference_examples
 

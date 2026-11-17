@@ -5,11 +5,10 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Protocol, TypeGuard, cast
 
-from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedSeq
 from ruamel.yaml.error import YAMLError
 
-from mediascripts.track.track_yaml.track_yaml_common import TextWriter, save_yaml_atomically
+from mediascripts.track.track_yaml.track_yaml_common import TextWriter, save_yaml_atomically, track_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ def is_list(value: object) -> TypeGuard[list[object]]:
 
 def load_track(path: Path, *, dry_run: bool) -> tuple[str, object, bool]:
     original = path.read_text(encoding="utf-8")
-    yaml = YAML()
+    yaml = track_yaml()
     try:
         return original, cast(_YamlLoader, yaml).load(original), False
     except YAMLError as error:
@@ -46,7 +45,7 @@ def load_track(path: Path, *, dry_run: bool) -> tuple[str, object, bool]:
         if not backup.is_file():
             raise
         restored = backup.read_text(encoding="utf-8")
-        backup_yaml = YAML()
+        backup_yaml = track_yaml()
         document = cast(_YamlLoader, backup_yaml).load(restored)
         if not is_mapping(document) or not is_mapping(document.get("trackData")):
             raise ValueError(f"Backup is not a track YAML document: {backup}") from error

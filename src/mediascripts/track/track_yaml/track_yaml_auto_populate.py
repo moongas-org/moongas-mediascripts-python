@@ -7,11 +7,13 @@ import shlex
 import tempfile
 import time
 from collections.abc import Mapping
+from functools import partial
 from io import StringIO
 from pathlib import Path
 from typing import Protocol, cast
 
 from mediascan.types.album.album_path import AlbumPathBuilder
+from mediascan.types.genre.genres import Genre
 from mediascan.types.track.track_yaml_file_validator import (
     is_list,
     is_mapping,
@@ -27,13 +29,15 @@ from yaml.error import YAMLError as PyYAMLError
 from mediascripts.common.cli.parse_boolean import parse_boolean
 from mediascripts.common.files import shuffled_files
 from mediascripts.common.openai.client import MODEL_NAME, get_client
-from mediascripts.mediafile.auto_tag_media_file import unescape_name
+from mediascripts.mediafile.auto_tag_media_file import load_media, read_track_values, text_values, unescape_name
+from mediascripts.track.track_yaml.infer_genre import filter_valid_genres, infer_artist_genre
 from mediascripts.track.track_yaml.track_yaml_common import (
     TextWriter,
     format_field_diff,
     iter_collection_files,
     save_yaml_atomically,
     show_yaml_file_diff,
+    track_yaml,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,18 +49,26 @@ SYSTEM_PROMPT = f"""You are an automated track metadata-filling assistant.
 Return ONLY valid YAML, without markdown fences, explanations, or comments.
 Use the TrackYamlFile schema: a trackData mapping and an optional trackIdData mapping.
 trackData contains title, artist, albumartist, album, genre (strings), and year (integer).
+Quote string values matching YAML boolean spellings, including y/yes/true/on and
+n/no/false/off in any capitalization.
+Use only these exact genre values: {", ".join(genre.value for genre in Genre)}.
 The trackIdData mapping may contain an optional streamingData list. Each streamingData
 entry must have streamingService, trackUrl, trackId, apiData, and optional isrc.
 Use streamingService values such as spotify, apple-music, deezer, and tidal.
 Quote every identifier and URL, including numeric service IDs (e.g. trackId: "123456").
 Fill missing core metadata and find ISRC and streaming identifiers/URLs for the exact
 recording, artist, album, and version, not another recording with a similar title.
-Preserve all existing non-empty metadata and identifiers. Never invent identifiers,
+Preserve all existing non-empty metadata and identifiers, except an existing genre
+that is not one of the listed values may be replaced. Never invent identifiers,
 URLs, or facts. Omit fields you cannot establish; do not use placeholder strings.
 trackIdData must be a mapping, never a list.
 The optional mediaFileData list contains local-file metadata, fingerprints, and AcoustID data.
 Preserve mediaFileData exactly; never invent, remove, or modify its entries.
 """
+
+infer_genre_from_neighbors = partial(
+    infer_artist_genre, read_track_values=read_track_values, load_media=load_media, text_values=text_values,
+)
 
 
 class _YamlLoader(Protocol):
@@ -101,7 +113,7 @@ def normalize_model_identifiers(content: str) -> str:
     if not changed:
         return content
     stream = StringIO()
-    cast(_YamlLoader, YAML(typ="safe")).dump(document, stream)
+    cast(_YamlLoader, track_yaml(typ="safe")).dump(document, stream)
     return stream.getvalue().strip()
 
 
@@ -127,7 +139,7 @@ def fill_albumartist_from_directory(
     if not album_path.valid or not artist:
         return content
 
-    yaml = cast(_YamlLoader, YAML())
+    yaml = cast(_YamlLoader, track_yaml())
     round_trip = yaml.load(content)
     if not is_mapping(round_trip):
         raise ValueError("Model response does not contain a trackData mapping")
@@ -139,6 +151,48 @@ def fill_albumartist_from_directory(
     yaml.dump(round_trip, stream)
     logger.info("[%s] Using artist directory as albumartist: %r", input_path, artist)
     return stream.getvalue().strip()
+
+
+def fill_valid_genre(content: str, original: Mapping[str, object], input_path: Path) -> str:
+    original_data = original.get("trackData")
+    existing = original_data.get("genre") if is_mapping(original_data) else None
+    document = load_document(content)
+    track_data = document.get("trackData")
+    if not is_mapping(track_data):
+        return content
+    proposed = track_data.get("genre")
+    if proposed is not None and not isinstance(proposed, str):
+        raise ValueError("trackData.genre must be a string")
+    if isinstance(proposed, str) and filter_valid_genres([proposed]):
+        return content
+    if isinstance(existing, str) and filter_valid_genres([existing]):
+        raise ValueError("Model changed existing track metadata at trackData.genre")
+    if proposed and proposed.strip():
+        logger.warning("[%s] Ignoring model genre %r: not in the mediascan Genre enum", input_path, proposed)
+    genre = infer_genre_from_neighbors(input_path)
+    if genre is None:
+        raise ValueError("No valid genre: model genre was invalid or missing and no artist clues exist")
+    yaml = cast(_YamlLoader, track_yaml())
+    round_trip = yaml.load(content)
+    if not is_mapping(round_trip):
+        raise ValueError("Model response does not contain a trackData mapping")
+    round_trip_data = round_trip.get("trackData")
+    if not is_mapping(round_trip_data):
+        raise ValueError("Model response does not contain a trackData mapping")
+    round_trip_data["genre"] = genre
+    stream = StringIO()
+    yaml.dump(round_trip, stream)
+    return stream.getvalue().strip()
+
+
+def original_for_preservation(original: Mapping[str, object]) -> Mapping[str, object]:
+    data = original.get("trackData")
+    if not is_mapping(data):
+        return original
+    genre = data.get("genre")
+    if not isinstance(genre, str) or not genre.strip() or filter_valid_genres([genre]):
+        return original
+    return {**original, "trackData": {key: value for key, value in data.items() if key != "genre"}}
 
 
 def has_identifiers(document: Mapping[str, object]) -> bool:
@@ -295,8 +349,9 @@ def process_track_yaml_file(
         completed_yaml = fill_albumartist_from_directory(
             completed_yaml, original, input_path
         )
+        completed_yaml = fill_valid_genre(completed_yaml, original, input_path)
         completed = validate_track_yaml_content(completed_yaml)
-        preserve_existing_values(original, completed)
+        preserve_existing_values(original_for_preservation(original), completed)
         if original.get("mediaFileData") != completed.get("mediaFileData"):
             raise ValueError("Model added, removed, or changed mediaFileData")
         if completed_yaml == raw_yaml.strip() or (
@@ -393,7 +448,12 @@ def main_loop(
         except YAML_ERRORS as error:
             logger.warning("[%s] Track YAML requires processing: %s", input_file, error)
         else:
-            if has_identifiers(document):
+            track_data = document.get("trackData")
+            genre = track_data.get("genre") if is_mapping(track_data) else None
+            valid_genre = isinstance(genre, str) and bool(filter_valid_genres([genre]))
+            if not valid_genre:
+                logger.warning("[%s] Track YAML requires processing: invalid genre %r", input_file, genre)
+            if has_identifiers(document) and valid_genre:
                 if len(examples) < 3:
                     examples.append(content)
                 if not force:

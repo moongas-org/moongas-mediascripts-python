@@ -38,16 +38,17 @@ import argparse
 import logging
 import os
 import random
-import string
 import shutil
 import tempfile
 import time
 from collections import Counter
 from collections.abc import Mapping
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Optional, Protocol, TextIO, cast
 
 import mutagen
+from mediascan.types.album.album_path import AlbumPathBuilder
 from openai import APIStatusError, OpenAI
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
@@ -77,13 +78,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-LETTER_DIRS_FOR_REFERENCE_EXAMPLES = ["A"]
-
-LETTER_DIRS_NEEDING_WORK = list(string.ascii_uppercase[1:])
-
-assert not (
-    set(LETTER_DIRS_FOR_REFERENCE_EXAMPLES) & set(LETTER_DIRS_NEEDING_WORK)
-), "Reference examples and needing work arrays intersect!"
+reference_artist_dir_pattern = "A*"
 
 
 # Train on all existing artist.yaml files.
@@ -198,6 +193,29 @@ def ensure_artist_yaml(artist_dir: Path, overrides: Mapping[str, object]) -> tup
             temporary_path.unlink(missing_ok=True)
     logger.info("Created minimal artist YAML from local clues: %s", path)
     return path, True
+
+
+def create_missing_artist_yaml(collection_data_path: Path) -> set[Path]:
+    """Find artists by their album directories and seed missing artist files."""
+    artist_dirs: set[Path] = set()
+
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    for root, directories, _ in os.walk(
+        collection_data_path, followlinks=True, onerror=walk_error,
+    ):
+        album_dir = Path(root)
+        if AlbumPathBuilder.of(album_dir).valid:
+            artist_dir = album_dir.parent.resolve()
+            artist_dirs.add(artist_dir)
+            directories.clear()
+    created_files: set[Path] = set()
+    for artist_dir in sorted(artist_dirs):
+        path, created = ensure_artist_yaml(artist_dir, {})
+        if created:
+            created_files.add(path.resolve())
+    return created_files
 
 
 def process_artist_yaml_file(
@@ -350,11 +368,13 @@ def process_artist_yaml_file(
 
 def process_artist_yaml_files(
     path: Path,
-    letters_dirs_to_work: list[str],
+    reference_artist_dir_pattern: str,
     processed_files: set[Path],
     llm_enabled: bool = True,
     specific_file: Optional[Path] = None,
     force: bool = False,
+    created_files: set[Path] | None = None,
+    quiet: bool = False,
 ) -> bool | None:
     logger.info("Starting YAML processing")
     logger.info("Input directory: %s", path.resolve())
@@ -381,13 +401,17 @@ def process_artist_yaml_files(
     else:
         input_files = [
             input_file
-            for input_file in load_input_files(path, letters_dirs_to_work)
+            for input_file in load_input_files(path)
             if input_file not in processed_files
+            and (
+                not fnmatchcase(input_file.parent.name, reference_artist_dir_pattern)
+                or (created_files is not None and input_file.resolve() in created_files)
+            )
         ]
     if not input_files:
         logger.warning(
-            "No unprocessed input files remain for letter directories: %s",
-            letters_dirs_to_work,
+            "No unprocessed input files remain (reference pattern: %s)",
+            reference_artist_dir_pattern,
         )
         return None
 
@@ -403,9 +427,11 @@ def process_artist_yaml_files(
             artists_missing,
             exceptions,
         )
-        if not artists_missing and not exceptions and not force:
+        newly_created = created_files is not None and input_file.resolve() in created_files
+        if not artists_missing and not exceptions and not force and not newly_created:
             processed_files.add(input_file)
-            logger.info("Skipping already-valid artist YAML file: %s", input_file)
+            if not quiet:
+                logger.info("Skipping already-valid artist YAML file: %s", input_file)
         else:
             if artists_missing:
                 logger.warning(
@@ -423,11 +449,13 @@ def process_artist_yaml_files(
         input_file for input_file in input_files if input_file not in processed_files
     ]
     if not input_files:
-        logger.info("All matching files are already valid; exiting loop")
+        if not quiet:
+            logger.info("All matching files are already valid; exiting loop")
         return None
 
     reference_examples = load_reference_examples(
-        Path(MOONGAS_COLLECTION_ROOTDIR) / "data", LETTER_DIRS_FOR_REFERENCE_EXAMPLES
+        Path(MOONGAS_COLLECTION_ROOTDIR) / "data", reference_artist_dir_pattern,
+        exclude_files=created_files,
     )
 
     logger.info(
@@ -469,9 +497,11 @@ def main_loop(
     llm_enabled: bool = True,
     specific_file: Optional[Path] = None,
     force: bool = False,
+    reference_artist_dir_pattern: str = reference_artist_dir_pattern,
+    quiet: bool = False,
 ):
     processed_files: set[Path] = set()
-    letter_dirs = LETTER_DIRS_NEEDING_WORK
+    created_files: set[Path] = set()
     collection_data_path = Path(MOONGAS_COLLECTION_ROOTDIR) / "data"
     if not llm_enabled:
         logger.info("LLM lookup disabled; exiting without modifying artist YAML files")
@@ -481,20 +511,27 @@ def main_loop(
         collection_data_path = specific_file.parent
         total_files = 1
     else:
-        total_files = len(load_input_files(collection_data_path, letter_dirs))
+        created_files = create_missing_artist_yaml(collection_data_path)
+        total_files = sum(
+            not fnmatchcase(path.parent.name, reference_artist_dir_pattern)
+            or path.resolve() in created_files
+            for path in load_input_files(collection_data_path)
+        )
     with tqdm(total=total_files, desc="Processing files", unit="file") as progress:
         while True:
             processed_count = len(processed_files)
             logger.info(
-                "Starting processing loop for letter directories: %s", letter_dirs
+                "Starting processing loop (reference pattern: %s)", reference_artist_dir_pattern
             )
             result = process_artist_yaml_files(
                 collection_data_path,
-                letter_dirs,
+                reference_artist_dir_pattern,
                 processed_files,
                 llm_enabled=llm_enabled,
                 specific_file=specific_file,
                 force=force,
+                created_files=created_files,
+                quiet=quiet,
             )
             progress.update(len(processed_files) - processed_count)
             if result is None:
@@ -560,6 +597,15 @@ def main(argv: list[str] | None = None) -> int:
         default=False,
         help="Force processing of all files, ignoring the pre-pass duplicate check and validation check.",
     )
+    parser.add_argument(
+        "--reference-artist-dir-pattern", default=reference_artist_dir_pattern, metavar="PATTERN",
+        help="Glob matching artist directory names used as references (default: %(default)s). "
+        "Matching directories missing artist.yml are still created and processed.",
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="Suppress already-valid artist YAML skip notices; keep processing updates, warnings, and errors.",
+    )
     args = parser.parse_args(argv)
     seed_options: dict[str, str | list[str] | None] = {
         "artistNames": args.artist, "city": args.city, "countryCode": args.country_code,
@@ -588,6 +634,8 @@ def main(argv: list[str] | None = None) -> int:
                 llm_enabled=args.llm,
                 specific_file=args.file,
                 force=args.force,
+                reference_artist_dir_pattern=args.reference_artist_dir_pattern,
+                quiet=args.quiet,
             )
         except KeyboardInterrupt:
             logger.info("Interrupted by user; exiting")

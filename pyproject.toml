@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mediascripts"
-version = "1.2.8"
+version = "1.2.9"
 requires-python = ">=3.11"
 authors = [{ name = "moongas.org", email = "moongas.org@gmail.com" }]
 maintainers = [{ name = "moongas.org", email = "moongas.org@gmail.com" }]
@@ -67,6 +67,7 @@ artist-yaml-test = "mediascripts.artist.artist_yaml.artist_yaml_test:main"
 auto-tag-media-file = "mediascripts.mediafile.auto_tag_media_file:main"
 track-yaml-auto-populate = "mediascripts.track.track_yaml.track_yaml_auto_populate:main"
 track-yaml-auto-populate-from-file = "mediascripts.track.track_yaml.track_yaml_auto_populate_from_file:main"
+track-yaml-reformat = "mediascripts.track.track_yaml.track_yaml_reformat:main"
 scan-media-files-to-track-yaml = "mediascripts.track.track_yaml.scan_media_files_to_track_yaml:main"
 convert-covers = "mediascripts.convert.convert_covers:main"
 convert-videos = "mediascripts.convert.convert_videos:main"

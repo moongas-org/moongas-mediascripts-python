@@ -13,16 +13,24 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import mutagen
+from dataclass_wizard import fromdict
 from dataclass_wizard.v0.errors import JSONWizardError
 from mediascan.types.track.track_data import TrackData
-from mediascan.types.track.track_yaml_file import TrackYamlFile
-from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
+from mediascan.types.track.track_yaml_file_validator import is_mapping
 from mediascan.types.album.album_path import AlbumPathBuilder
 from mutagen.easyid3 import EasyID3
-from yaml import YAMLError
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError as RuamelYAMLError
+from yaml import YAMLError as PyYAMLError
 
 logger = logging.getLogger(__name__)
 
+BOOLEAN_LIKE_STRINGS = frozenset(
+    {
+        "y", "Y", "yes", "Yes", "YES", "true", "True", "TRUE", "on", "On", "ON",
+        "n", "N", "no", "No", "NO", "false", "False", "FALSE", "off", "Off", "OFF",
+    }
+)
 TAG_FIELDS = {
     "title": "title",
     "artist": "artist",
@@ -31,11 +39,32 @@ TAG_FIELDS = {
     "genre": "genre",
     "year": "date",
 }
-TRACK_ERRORS = (OSError, UnicodeError, YAMLError, JSONWizardError, ValueError, TypeError, mutagen.MutagenError)
+TRACK_ERRORS = (
+    OSError, UnicodeError, PyYAMLError, RuamelYAMLError, JSONWizardError,
+    ValueError, TypeError, mutagen.MutagenError,
+)
 
 
 class TextWriter(Protocol):
     def write(self, text: str, /) -> int: ...
+
+
+class _YamlRepresenter(Protocol):
+    def represent_scalar(self, tag: str, value: str, style: str | None = None) -> object: ...
+
+
+def _represent_track_yaml_string(representer: _YamlRepresenter, value: str) -> object:
+    style = '"' if value in BOOLEAN_LIKE_STRINGS else None
+    return representer.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+def track_yaml(typ: str = "rt", *, preserve_quotes: bool = False) -> YAML:
+    """Create a YAML handler that quotes boolean-like strings."""
+    yaml = YAML(typ=typ)
+    yaml.preserve_quotes = preserve_quotes
+    yaml.default_flow_style = False
+    yaml.representer.add_representer(str, _represent_track_yaml_string)
+    return yaml
 
 
 def save_yaml_atomically(
@@ -97,7 +126,7 @@ def iter_collection_files(
 
 
 def load_track_metadata(track_path: Path) -> tuple[TrackData, EasyID3] | None:
-    """Load metadata, or return None for an excluded artist."""
+    """Load core track metadata only, or return None for an excluded artist."""
     exclude_keywords = [
         keyword for keyword in os.environ.get("COPY_MEDIALIB_EXCLUDE_KEYWORDS", "").splitlines()
         if keyword.strip()
@@ -107,10 +136,14 @@ def load_track_metadata(track_path: Path) -> tuple[TrackData, EasyID3] | None:
         logger.debug("[%s] Skipping excluded artist directory %r", track_path, artist_dirname)
         return None
     yaml_path = track_path.with_suffix(".yml")
-    track_yaml = cast(object, load_track_yaml_file(yaml_path))
-    if not isinstance(track_yaml, TrackYamlFile):
+    with yaml_path.open(encoding="utf-8") as stream:
+        document: object = track_yaml(typ="safe").load(stream)
+    if not is_mapping(document):
         raise ValueError("Expected a track YAML mapping, not a sequence")
-    track_data = track_yaml.track_data
+    data = document.get("trackData", document.get("track_data"))
+    if not is_mapping(data):
+        raise ValueError("Expected a trackData mapping")
+    track_data = fromdict(TrackData, data)
     if any(keyword in track_data.artist for keyword in exclude_keywords):
         logger.debug("[%s] Skipping excluded artist %r", track_path, track_data.artist)
         return None

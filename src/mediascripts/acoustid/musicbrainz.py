@@ -16,13 +16,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from ruamel.yaml import YAML
-
 from mediascripts.acoustid.acoustid import YAML_ERRORS, is_list, is_mapping, track_files
 from mediascripts.acoustid.recording_yaml import load_track, normalize_isrcs
 from mediascripts.track.track_yaml.track_yaml_common import (
     TextWriter,
     save_yaml_atomically,
+    track_yaml,
 )
 
 logger = logging.getLogger(__name__)
@@ -240,7 +239,7 @@ def run(
             break
         try:
             original, document, recovered = load_track(path, dry_run=dry_run or offline)
-            yaml = cast(_Yaml, YAML())
+            yaml = cast(_Yaml, track_yaml())
             if not is_mapping(document) or not is_mapping(document.get("trackData")):
                 if specific_file is not None:
                     raise ValueError("Expected a track YAML document with a trackData mapping")

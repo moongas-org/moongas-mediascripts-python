@@ -310,6 +310,7 @@ def copy_medialib(
     ):
         _log_pending_change(src_file_abs_path, dst_abs_path, diff=diff)
         if not dry_run:
+            dst_abs_path.parent.mkdir(parents=True, exist_ok=True)
             if make_track_yml:
                 dst_abs_path.write_text("")
             else:

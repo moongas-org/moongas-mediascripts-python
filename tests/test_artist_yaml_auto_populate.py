@@ -153,6 +153,8 @@ def test_dir_continues_into_enrichment(
     assert populate.main(["--dir", str(artist), "--sleep", "0"]) == 0
     assert calls == [{
         "sleep_between_files": 0, "llm_enabled": True, "specific_file": path, "force": not existing,
+        "reference_artist_dir_pattern": "A*",
+        "quiet": False,
     }]
 
 
@@ -182,6 +184,180 @@ def test_llm_disabled_creates_locally_without_client(
     monkeypatch.setattr(populate, "get_client", fail_client)
     assert populate.main(["--dir", str(artist), "--llm=false"]) == 0
     assert (artist / "artist.yml").is_file()
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("yaml", "Track Artist"), ("media", "Tagged Artist"), ("directory", "Band.Name"),
+])
+def test_collection_creates_and_enriches_missing_artist_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, expected: str,
+) -> None:
+    artist = tmp_path / "data" / "Music" / "Band_Name"
+    (artist / "Album [2001]").mkdir(parents=True)
+    if source == "yaml":
+        track_yaml(artist, "01", {"albumartist": expected})
+    elif source == "media":
+        media_file(artist, "01", albumartist=expected)
+    monkeypatch.setattr(populate, "MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    monkeypatch.setattr(populate, "get_client", lambda: None)
+    processed: list[Path] = []
+
+    def process(input_path: Path, *args: object, **kwargs: object) -> bool:
+        assert yaml.safe_load(input_path.read_text())["artistData"]["artistNames"] == [expected]
+        processed.append(input_path.resolve())
+        return True
+
+    monkeypatch.setattr(populate, "process_artist_yaml_file", process)
+    populate.main_loop(0)
+
+    assert processed == [(artist / "artist.yml").resolve()]
+    assert not (artist / "Album [2001]" / "artist.yml").exists()
+
+
+def test_collection_discovery_preserves_existing_files_and_creates_all_missing(
+    tmp_path: Path,
+) -> None:
+    for name in ("Artist", "Band", "Cat"):
+        (tmp_path / name / "Album [2001]").mkdir(parents=True)
+    existing = tmp_path / "Band" / "artist.yml"
+    existing.write_text("# existing artist\n")
+    (tmp_path / "Container").mkdir()
+
+    created = populate.create_missing_artist_yaml(tmp_path)
+
+    assert created == {
+        (tmp_path / "Cat" / "artist.yml").resolve(),
+        (tmp_path / "Artist" / "artist.yml").resolve(),
+    }
+    assert existing.read_text() == "# existing artist\n"
+    assert (tmp_path / "Artist" / "artist.yml").is_file()
+    assert not (tmp_path / "Container" / "artist.yml").exists()
+
+
+def test_collection_llm_disabled_does_not_create_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artist = tmp_path / "data" / "Music" / "Band"
+    (artist / "Album [2001]").mkdir(parents=True)
+    monkeypatch.setattr(populate, "MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+
+    populate.main_loop(0, llm_enabled=False)
+
+    assert not (artist / "artist.yml").exists()
+
+
+@pytest.mark.parametrize("pattern,reference,missing,other", [
+    ("A*", "Alpha", "Another", "123 Band"),
+    ("Ref?*", "RefOne", "RefTwo", "!Band"),
+    ("*", "Existing", "Missing", None),
+    ("", "Existing", "Missing", "Other"),
+])
+def test_reference_pattern_selects_examples_but_processes_missing_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    pattern: str, reference: str, missing: str, other: str | None,
+) -> None:
+    data = tmp_path / "data" / "Music"
+    names = [reference, missing] + ([other] if other is not None else [])
+    for name in names:
+        (data / name / "Album [2001]").mkdir(parents=True)
+    existing = data / reference / "artist.yml"
+    existing.write_text("artistData:\n  artistNames: [Reference]\n")
+    monkeypatch.setattr(populate, "MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    monkeypatch.setattr(populate, "get_client", lambda: None)
+    monkeypatch.setattr(populate, "try_load_artist_yaml_for_skip", lambda path: False)
+    processed: list[Path] = []
+    examples: list[str] = []
+
+    def process(input_path: Path, reference_examples: str, *args: object, **kwargs: object) -> bool:
+        processed.append(input_path.resolve())
+        examples.append(reference_examples)
+        return True
+
+    monkeypatch.setattr(populate, "process_artist_yaml_file", process)
+    populate.main_loop(0, reference_artist_dir_pattern=pattern)
+
+    expected = {(data / missing / "artist.yml").resolve()}
+    if other is not None:
+        expected.add((data / other / "artist.yml").resolve())
+    if pattern == "":
+        expected.add(existing.resolve())
+    assert set(processed) == expected
+    assert len(processed) == len(expected)
+    assert all(("Reference" in example) == (pattern != "") for example in examples)
+    assert all(f"{missing}/artist.yml" not in example for example in examples)
+
+
+def test_cli_reference_pattern_is_forwarded(
+    artist: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(populate, "main_loop", lambda **kwargs: calls.append(kwargs))
+
+    assert populate.main([
+        "--dir", str(artist), "--reference-artist-dir-pattern", "[AB]*",
+    ]) == 0
+
+    assert calls[0]["reference_artist_dir_pattern"] == "[AB]*"
+
+
+@pytest.mark.parametrize("flag", ["-q", "--quiet"])
+def test_cli_quiet_is_forwarded(
+    artist: Path, monkeypatch: pytest.MonkeyPatch, flag: str,
+) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(populate, "main_loop", lambda **kwargs: calls.append(kwargs))
+
+    assert populate.main(["--dir", str(artist), flag]) == 0
+
+    assert calls[0]["quiet"] is True
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_quiet_suppresses_valid_skip_notices_without_changing_skip_behavior(
+    artist: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, quiet: bool,
+) -> None:
+    path = artist / "artist.yml"
+    path.write_text("artistData:\n  artistNames: [Artist]\n")
+    original = path.read_bytes()
+    monkeypatch.setattr(populate, "get_client", lambda: None)
+    monkeypatch.setattr(populate, "try_load_artist_yaml_for_skip", lambda path: True)
+    monkeypatch.setattr(populate, "validate_artist_yaml_file", lambda *args: None)
+    processed: set[Path] = set()
+
+    with caplog.at_level(logging.INFO):
+        assert populate.process_artist_yaml_files(
+            artist, "A*", processed, specific_file=path, quiet=quiet,
+        ) is None
+
+    assert ("Skipping already-valid artist YAML file" in caplog.text) is not quiet
+    assert ("All matching files are already valid" in caplog.text) is not quiet
+    assert processed == {path}
+    assert path.read_bytes() == original
+
+
+def test_quiet_preserves_error_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(populate, "get_client", lambda: None)
+    assert populate.process_artist_yaml_files(
+        tmp_path, "A*", set(), specific_file=tmp_path / "missing.yml", quiet=True,
+    ) is False
+    assert "Specified file does not exist" in caplog.text
+
+
+def test_collection_creation_failure_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    (tmp_path / "data" / "Music" / "Band" / "Album [2001]").mkdir(parents=True)
+    monkeypatch.setattr(populate, "MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+
+    def denied(artist_dir: Path, overrides: object) -> tuple[Path, bool]:
+        raise PermissionError("cannot create seed")
+
+    monkeypatch.setattr(populate, "ensure_artist_yaml", denied)
+
+    assert populate.main(["--sleep", "0"]) == 1
+    assert "cannot create seed" in caplog.text
 
 
 def test_invalid_directory_fails(tmp_path: Path) -> None:

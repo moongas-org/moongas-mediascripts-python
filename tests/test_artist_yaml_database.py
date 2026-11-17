@@ -1,4 +1,5 @@
 import argparse
+import shlex
 import sqlite3
 import sys
 from pathlib import Path
@@ -55,7 +56,12 @@ def test_reformat_uses_database_paths_and_updates_artist_yaml(
     reformat_main()
 
     assert "regionCode: GB-LND" in artist_yaml.read_text(encoding="utf-8")
-    assert f"Updated {artist_yaml}" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Updated " + str(artist_yaml) in output
+    backup_path = artist_yaml.with_name("artist.yml.bak")
+    assert backup_path.read_text(encoding="utf-8") == VALID_ARTIST_YAML
+    command = next(line for line in output.splitlines() if line.startswith("meld "))
+    assert shlex.split(command) == ["meld", str(backup_path), str(artist_yaml)]
 
 
 def test_reformat_all_rewrites_database_artists(

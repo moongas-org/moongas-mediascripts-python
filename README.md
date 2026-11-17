@@ -69,6 +69,19 @@ uv sync --extra dev --extra llm --extra stats
 
 ### Populate one artist directory
 
+Without `--dir` or `--file`, collection runs also discover missing `artist.yml`
+files from valid mediascan album directories. Missing files are seeded using the
+local clues described below, then passed through normal LLM auto-population.
+Existing artist files are not overwritten by seeding. Existing files in artist
+directories matching the case-sensitive glob `A*` are used as reference examples
+and excluded from collection processing. Override the glob with
+`--reference-artist-dir-pattern PATTERN` (quote it to avoid shell expansion).
+All other artist directories are eligible, including names beginning with digits
+or punctuation. Matching reference directories with missing files are still seeded
+and processed; their new files are excluded from examples for that run.
+Collection-wide `--llm=false` runs create no files. Explicit `--dir`/`--file`
+targets remain eligible regardless of the reference pattern.
+
 ```bash
 artist-yaml-auto-populate --dir "/music/Artist"
 artist-yaml-auto-populate --dir "/music/Artist" --artist "Artist" --artist "Alias" \
@@ -590,6 +603,7 @@ track:
   merge-track-yaml-with-media-file
   scan-media-files-to-track-yaml
   track-yaml-auto-populate
+  track-yaml-reformat
 ```
 
 ## Copy Media Library Diagnostics
@@ -606,6 +620,39 @@ source path and excludes all included files; `copy-medialib` warns explicitly
 about this. An unset variable causes the wrappers to exit without copying.
 `--overwrite-existing` still skips newer destination files;
 `--overwrite-newer` permits replacing those files instead.
+Before each copy or `--make-track-yml` write, missing destination parent
+directories are created, including artist and album directories. Dry runs
+do not create directories.
+
+## Reformat Track YAML
+
+`track-yaml-reformat` converts non-empty flow-style mappings and sequences to
+block style, including nested collections. Empty collections remain `[]` or
+`{}`. It also inserts `recordings: []` into media-file AcoustID results that lack
+the required `recordings` field, including in files already in block style.
+Existing `recordings` values and track-level AcoustID results are left unchanged.
+Comments, quoted strings and aliases are retained where supported; files with
+unintended content, alias or comment changes are reported and left untouched.
+
+```bash
+track-yaml-reformat
+track-yaml-reformat --file "/path/to/01 - Song.yml"
+track-yaml-reformat --dir "/path/to/music" --count 10 --dry-run
+```
+
+By default, track YAML files in album directories under
+`$MOONGAS_COLLECTION_ROOTDIR/data` are scanned, including library symlinks.
+`--dir` recursively scans the specified directory; artist, album and files
+metadata YAML is excluded. `--file` selects one YAML file. `--count` limits
+the number of files actually updated (or that would be updated in dry-run),
+including AcoustID repairs; unchanged files do not count. `--dry-run` shows
+proposed diffs without writing files. At INFO level (the default), the command
+logs when discovery starts, the number of files found, and the first file being
+processed. While processing, it reports progress about every five seconds
+between files, including the current path and update/error counts, even when
+files need no changes. Updates retain a `.bak` copy and log a
+shell-ready `meld` command. Errors are reported and produce a nonzero exit status
+while processing continues.
 
 ## Scan Media Files into Track YAML
 
@@ -668,8 +715,9 @@ Uses the mediascan `TrackYamlFile` schema: `trackData` contains `title`, `artist
 **mapping** containing a `streamingData` list. Each streaming entry has
 `streamingService`, `trackUrl`, `trackId`, `apiData`, and optional `isrc`.
 Optional `mediaFileData` contains local-file metadata, `fpcalcData` fingerprints,
-and `acoustidData` results. Tracks with valid core metadata and at least one
-non-empty streaming track ID or URL are skipped unless `--force` is used.
+and `acoustidData` results. Tracks with valid core metadata, a genre in the
+mediascan `Genre` enum, and at least one non-empty streaming track ID or URL
+are skipped unless `--force` is used.
 The LLM must preserve `mediaFileData` exactly; it cannot add or change audio
 fingerprints, local-file metadata, or AcoustID data.
 If the original `trackData.albumartist` is missing or blank, the command fills
@@ -680,6 +728,12 @@ validated separately. If the original is non-empty, it is never replaced.
 As with media tagging, underscores in directory names are converted back to
 periods; this conversion is best-effort and may be lossy. Dry runs preview the
 fallback without saving, and `--llm=false` still makes no changes.
+For a missing or invalid existing genre, the command uses the model's genre
+if it exactly matches a mediascan `Genre` value; otherwise it infers the most
+common valid genre from neighboring tracks under the artist, using the same
+rules as `auto-tag-media-file`. If neither source yields a valid genre, the
+model result is rejected; any album-artist fallback already saved remains in
+place. Existing valid genres and other non-empty metadata are protected.
 Up to three complete files in the selected scope serve as reference examples.
 Pending tracks are shuffled and processed once per run, with 30 seconds between
 requests by default. `--llm=false` only checks files, without creating a client
@@ -712,7 +766,7 @@ unlimited, and `--count 0` makes no LLM requests. The limit also applies to
 dry-run previews, but does not limit backup cleanup with `--clean`.
 
 Responses must pass schema validation and preserve existing non-empty metadata
-and identifiers before being saved atomically. Unquoted decimal service IDs
+and identifiers, except for invalid existing genres, before being saved atomically. Unquoted decimal service IDs
 returned by the model are converted to strings, preserving their original digits
 (including leading zeros); other invalid identifier types are rejected with the
 field path and offending value. Before saving, changed fields
@@ -773,6 +827,17 @@ Multi-disc releases use `01.01 - Track.yml`. Unsupported filename characters
 are replaced with underscores; original metadata spelling is retained inside YAML.
 Existing artist/album YAML files are left untouched; no audio is downloaded.
 
+Before creating artist or album directories, the command reuses existing sibling
+directories matching after Unicode/case, punctuation, escaping, and whitespace
+normalization. For example, `The Vertigo of Bliss` reuses `The Vertigo Of Bliss`;
+periods in new names are escaped as underscores (`R.E.M.` becomes `R_E_M_`).
+Album matching accepts the same release year or an existing name without a year
+suffix; different years and edition names remain separate. Existing directories
+are not renamed. Multiple matching directories are reported as ambiguous and the
+request remains pending rather than choosing one or creating another. Arbitrary
+spelling differences are not automatically fuzzy-matched, to avoid mixing
+different artists or releases.
+
 The OpenAI-compatible LLM interprets each line, then selects a recording and
 release from live MusicBrainz search results. YouTube playlist URLs request a
 full album; YouTube video and Shazam song URLs request a single track, even
@@ -794,18 +859,27 @@ request remains in the input file with a warning. A requested track must occur
 on the selected release. Album requests
 expand into every track on the selected release, not just its title track.
 Track titles, artist credits, album titles, years and disc/track positions come
-from MusicBrainz; genre is supplied by the LLM. Requests without a convincing
-match, known genre, release year, or complete tracklist are reported as errors
-rather than creating placeholders. Model selections and genres still need human
+from MusicBrainz. Genre uses the LLM's value when it exactly matches a mediascan
+`Genre` enum value; otherwise it falls back to the most common valid genre on
+neighboring tracks under the release's album artist, using the same rules as
+`auto-tag-media-file`. The model is asked to omit an unknown genre. If neither
+source provides a valid genre, the request remains pending with a warning.
+Requests without a convincing match, release year, or complete tracklist are
+reported as errors rather than creating placeholders. Model selections and genres still need human
 review. Requests not catalogued in MusicBrainz cannot currently be imported.
 No streaming IDs, fingerprints, or local-media data are invented.
 Responses wrapped in a single YAML markdown code fence are unwrapped before
-strict YAML parsing; surrounding prose, multiple blocks, and invalid YAML remain
-errors.
+strict YAML parsing. All model responses are instructed to double-quote strings,
+including titles containing `:` or `#`, and escape quotes and backslashes.
+YAML parsing failures trigger one logged retry with the parser error and quoting
+instructions; a second parsing failure leaves the request pending. Surrounding
+prose, multiple blocks, and invalid response structures are not accepted.
 
 Every proposed track passes the mediascan `TrackYamlFile` validator before
-writing. For single-track requests, the command scans the destination and all
-configured collection `mediaDirs` for existing track YAML or tagged media with
+writing. Generated YAML uses block-style mappings and sequences (empty
+collections use YAML's `[]` or `{}` notation). For single-track requests, the
+command scans the destination and all configured collection `mediaDirs` for
+existing track YAML or tagged media with
 matching artist and title (case- and whitespace-insensitive); a match is
 skipped and counts as success. This is a metadata match, not a recording-ID
 comparison, so distinct recordings with identical artist and title cannot be
@@ -888,6 +962,8 @@ It uses Mutagen to compare the six core `trackData` fields: `title`, `artist`,
 `albumartist`, `album`, `genre`, and `year` (against the ID3 date's year).
 Leading/trailing whitespace is ignored; additional ID3 values are reported as
 differences. Extra tags and streaming identifiers are not compared.
+Only core track metadata is deserialized, so incomplete optional AcoustID results
+(such as results without `recordings`) do not prevent comparison or merging.
 
 Tracks are skipped before reading YAML or media tags when their artist directory
 contains any newline-separated keyword in `COPY_MEDIALIB_EXCLUDE_KEYWORDS`.

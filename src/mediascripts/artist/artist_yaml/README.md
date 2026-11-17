@@ -35,7 +35,8 @@ This Python script automates the process of completing and validating missing fi
 ## Key Features & Functionality
 
 * **LLM-Powered Auto-Population:** Leverages an OpenAI-compatible API (such as GitHub Models or OpenAI) to fill in missing fields based on strict system instructions and reference examples.
-* **Few-Shot Learning:** Uses completed YAML files from the `A` directory (`LETTER_DIRS_FOR_REFERENCE_EXAMPLES`) as schema and content references to guide the model for files in directories `B` through `Z`.
+* **Few-Shot Learning:** Existing artist YAML files in directories matching `reference_artist_dir_pattern` (default: `A*`) are used as references and excluded from collection processing. Matching is a case-sensitive shell-style glob against the artist directory basename. All nonmatching artists are eligible, including names beginning with numbers or punctuation. Explicit `--dir`/`--file` targets override the exclusion.
+* **Missing Artist Files:** Collection runs discover artist directories from valid mediascan album directories. Missing `artist.yml` files are seeded from track YAML, then media tags, then the directory name, and queued for normal LLM auto-population, even in directories matching the reference pattern. Newly created files are not used as reference examples during that run. Existing files are not overwritten during seeding. Collection runs with `--llm=false` create no files.
 * **Safe File Handling:** 
   * Creates a `.bak` backup file alongside the original before overwriting.
   * Writes updates atomically using temporary files (`tempfile.NamedTemporaryFile`) to prevent data corruption.
@@ -49,8 +50,10 @@ This Python script automates the process of completing and validating missing fi
 | :--- | :--- | :--- |
 | `--clean` | *None* | Deletes all `.bak` backup files in the collection root and exits immediately. |
 | `--sleep` | `INT` | Specifies the number of seconds to pause between processing loops (default: `30`). |
+| `-q`, `--quiet` | *None* | Suppress already-valid skip notices; processing updates, warnings, and errors remain visible. |
 | `--llm` | `true/false` | Enables or disables LLM lookups (default: `true`). Use `--llm=false` to check files without changing them. |
 | `--file` | `PATH` | Process a single specific artist YAML file instead of scanning all directories. |
+| `--reference-artist-dir-pattern` | `PATTERN` | Glob matching artist directory names used as references (default: `A*`). Quote patterns, e.g. `--reference-artist-dir-pattern '[AB]*'`. Matching directories missing `artist.yml` are still processed. |
 | `--force` | *None* | Force processing of all files, ignoring the pre-pass duplicate check and validation check. |
 ---
 

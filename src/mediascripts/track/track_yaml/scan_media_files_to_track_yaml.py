@@ -13,7 +13,6 @@ from typing import Protocol, cast
 
 import mutagen
 from mediascan.types.track.track_yaml_file_validator import is_mapping, is_list
-from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from mediascripts.track.track_yaml.track_yaml_common import (
@@ -21,6 +20,7 @@ from mediascripts.track.track_yaml.track_yaml_common import (
     iter_collection_files,
     save_yaml_atomically,
     show_yaml_file_diff,
+    track_yaml,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,8 +106,7 @@ def process_track_yaml(
 ) -> bool:
     try:
         media_path = find_media_file(track_yaml_path)
-        yaml = YAML()
-        yaml.preserve_quotes = True
+        yaml = track_yaml(preserve_quotes=True)
         yaml.width = 4096
         round_trip_yaml = cast(_RoundTripYaml, yaml)
         original = track_yaml_path.read_text(encoding="utf-8")
@@ -227,7 +226,7 @@ def process_track_yaml(
         return False
 
 
-def _collection_data_path(specific_dir: Path | None) -> Path:
+def collection_data_path(specific_dir: Path | None) -> Path:
     if specific_dir is not None:
         path = specific_dir
     else:
@@ -269,7 +268,7 @@ def main() -> int:
             track_yaml_files = [args.file]
         else:
             track_yaml_files = load_track_yaml_files(
-                _collection_data_path(args.dir), album_directories_only=args.dir is None
+                collection_data_path(args.dir), album_directories_only=args.dir is None
             )
         if args.count is not None:
             track_yaml_files = track_yaml_files[:args.count]

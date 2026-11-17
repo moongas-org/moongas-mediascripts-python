@@ -1,10 +1,12 @@
 import logging
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from mediascripts.copy import copy_medialib as copy_module
 from mediascripts.convert.convert_covers import convert_medialibs_cover_images_inplace
 from mediascripts.copy.copy_medialib import (
     DirCopyMode,
@@ -33,6 +35,40 @@ def test_copy_all(tmp_path: Path):
     src_path2 = tmp_path / "src" / "lib2"
     dst_path = tmp_path / "dst"
     copy_medialibs([src_path1, src_path2], dst_path)
+
+
+@pytest.mark.parametrize("make_track_yml", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_copy_creates_parent_for_source_added_after_directory_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_track_yml: bool, dry_run: bool,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    real_walk = os.walk
+    walk_count = 0
+
+    def walk_with_new_album(path: Path, topdown: bool = True) -> Iterator[tuple[str, list[str], list[str]]]:
+        nonlocal walk_count
+        walk_count += 1
+        yield from real_walk(path, topdown=topdown)
+        if walk_count == 1:
+            album = source / "The Doors" / "The Very Best of The Doors [2008]"
+            album.mkdir(parents=True)
+            (album / "01 - Break On Through.yml").write_text("trackData: {}\n")
+
+    monkeypatch.setattr(copy_module.os, "walk", walk_with_new_album)
+    result = copy_medialib(
+        source, destination, include_filenames=["*.yml"], dry_run=dry_run,
+        make_track_yml=make_track_yml,
+    )
+    output = destination / "The Doors" / "The Very Best of The Doors [2008]" / "01 - Break On Through.yml"
+    assert result.would_be_copied == 1
+    assert result.actually_copied == (0 if dry_run else 1)
+    if dry_run:
+        assert not destination.exists()
+    else:
+        assert output.read_text() == ("" if make_track_yml else "trackData: {}\n")
 
 
 @pytest.mark.parametrize(

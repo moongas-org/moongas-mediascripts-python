@@ -185,6 +185,38 @@ def test_accept_yaml_logs_copy_and_confirms_persisted_id3_tag(
     assert document["mediaFileData"][0]["path"] == str(track)
 
 
+@pytest.mark.parametrize("choice", ["y", "m"])
+@pytest.mark.parametrize("media_key", ["mediaFileData", "media_file_data"])
+def test_merge_preserves_acoustid_results_without_recordings(
+    track: Path, monkeypatch: pytest.MonkeyPatch, choice: str, media_key: str,
+) -> None:
+    yaml_path = track.with_suffix(".yml")
+    yaml_path.write_text(
+        yaml_path.read_text(encoding="utf-8")
+        + f"{media_key}:\n"
+        "  - acoustidData:\n"
+        "      results:\n"
+        "        - id: ce5c6d17-e019-4f29-a57d-baf821410c44\n"
+        "          score: 0.99709123\n",
+        encoding="utf-8",
+    )
+    original_result = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))[media_key][0]["acoustidData"]
+    tags = EasyID3(track)
+    tags["title"] = "Different title"
+    tags.save(track)
+    monkeypatch.setattr("builtins.input", lambda prompt: choice)
+
+    assert merge.merge_track(track)
+
+    document = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    assert document[media_key][0]["acoustidData"] == original_result
+    expected_title = "Track" if choice == "y" else "Different title"
+    assert document["trackData"]["title"] == expected_title
+    assert EasyID3(track)["title"] == [expected_title]
+    assert "# Keep this comment" in yaml_path.read_text(encoding="utf-8")
+    assert compare.compare_track(track, quiet=True)
+
+
 @pytest.mark.parametrize("field", list(TAG_FIELDS))
 def test_custom_value_is_saved_to_both_files(
     track: Path, monkeypatch: pytest.MonkeyPatch,

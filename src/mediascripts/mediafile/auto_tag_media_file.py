@@ -5,8 +5,8 @@ import base64
 import logging
 import re
 import struct
-from collections import Counter
 from collections.abc import Mapping, MutableMapping
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import Protocol, TextIO, cast
@@ -25,10 +25,14 @@ from mutagen.mp4 import MP4, MP4Cover, MP4Tags
 from mutagen.ogg import OggFileType
 from mutagen.wave import WAVE
 from PIL import Image
-from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from mediascripts.lyrics.lyrics_common import MEDIA_EXTENSIONS
+from mediascripts.track.track_yaml.infer_genre import (
+    filter_valid_genres,
+    infer_artist_genre as _infer_artist_genre,
+)
+from mediascripts.track.track_yaml.track_yaml_common import track_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +118,7 @@ def read_track_values(path: Path) -> dict[str, str]:
     if not candidates:
         return {}
     with candidates[0].open(encoding="utf-8") as stream:
-        document = cast(_YamlReader, YAML(typ="safe")).load(stream)
+        document = cast(_YamlReader, track_yaml(typ="safe")).load(stream)
     if not isinstance(document, dict):
         raise ValueError(f"Expected a YAML mapping in {candidates[0]}")
     mapping = cast(Mapping[str, object], document)
@@ -238,54 +242,9 @@ def has_cover(media: ID3 | mutagen.FileType) -> bool:
     return any(mapping.get(key) for key in ("covr", "metadata_block_picture", "coverart", "WM/Picture"))
 
 
-def infer_artist_genre(path: Path) -> str | None:
-    """Count each neighboring track once, preferring valid YAML over media tags."""
-    valid_genres = {genre.value for genre in Genre}
-    counts: Counter[str] = Counter()
-    for album in sorted(path.parent.parent.iterdir()):
-        if not album.is_dir():
-            continue
-        tracks: dict[str, list[Path]] = {}
-        for candidate in sorted(album.iterdir()):
-            if (
-                not candidate.is_file()
-                or candidate.suffix.lower() not in {*MEDIA_EXTENSIONS, ".yml", ".yaml"}
-                or candidate.stem.lower() in {"artist", "artists", "album", "files"}
-                or (album == path.parent and candidate.stem == path.stem)
-            ):
-                continue
-            tracks.setdefault(candidate.stem, []).append(candidate)
-        for candidates in tracks.values():
-            genres: list[str] = []
-            try:
-                value = read_track_values(candidates[0]).get("genre")
-                if value in valid_genres:
-                    genres = [value]
-                elif value:
-                    logger.warning("[%s] Ignoring invalid neighboring YAML genre %r", candidates[0], value)
-            except (OSError, UnicodeError, ValueError, TypeError, YAMLError) as error:
-                logger.warning("[%s] Could not read neighboring track YAML: %s", candidates[0], error)
-            if not genres:
-                for candidate in candidates:
-                    if candidate.suffix.lower() not in MEDIA_EXTENSIONS:
-                        continue
-                    try:
-                        values = text_values(load_media(candidate), "genre")
-                        genres = [value for value in values if value in valid_genres]
-                        invalid = [value for value in values if value not in valid_genres]
-                        if invalid:
-                            logger.warning("[%s] Ignoring invalid neighboring media genres %r", candidate, invalid)
-                    except (OSError, ValueError, TypeError, mutagen.MutagenError) as error:
-                        logger.warning("[%s] Could not read neighboring media genres: %s", candidate, error)
-                    if genres:
-                        break
-            counts.update(set(genres))
-    if not counts:
-        logger.info("[%s] No valid neighboring genres found for artist", path)
-        return None
-    selected = min(counts, key=lambda genre: (-counts[genre], genre))
-    logger.info("[%s] Inferred artist genre %r from neighboring tracks: %s", path, selected, dict(sorted(counts.items())))
-    return selected
+infer_artist_genre = partial(
+    _infer_artist_genre, read_track_values=read_track_values, load_media=load_media, text_values=text_values,
+)
 
 
 def find_cover(path: Path) -> Path | None:
@@ -370,7 +329,7 @@ def auto_tag_media_file(
             logger.warning("[%s] Ignoring filename track number outside 1-99: %s", path, prefix.group())
     media = load_media(path)
     genres = [values["genre"]] if "genre" in values else text_values(media, "genre")
-    valid_genres = {genre.value for genre in Genre}
+    valid_genres = filter_valid_genres(genres)
     invalid_genres = [genre for genre in genres if genre not in valid_genres]
     if invalid_genres:
         logger.warning(
@@ -378,7 +337,7 @@ def auto_tag_media_file(
             path, invalid_genres, "would unset" if dry_run else "unsetting",
         )
         values["genre"] = ""
-    if "genre" not in overrides and not any(genre in valid_genres for genre in genres):
+    if "genre" not in overrides and not valid_genres:
         inferred_genre = infer_artist_genre(path)
         if inferred_genre is not None:
             values["genre"] = inferred_genre

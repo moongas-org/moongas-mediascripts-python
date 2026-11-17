@@ -8,12 +8,13 @@ from unittest.mock import MagicMock
 import pytest
 from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
 from mediascan.types.track import track_yaml_file_validator as validator
+from mutagen.id3 import ID3, TCON
 from openai import APIConnectionError, APIStatusError, OpenAI
 
 from mediascripts.common import files
 from mediascripts.track.track_yaml import track_yaml_auto_populate as populate
 
-CORE = "trackData:\n  title: Track\n  artist: Artist\n  albumartist: Artist\n  album: Album\n  genre: Rock\n  year: 1995\n"
+CORE = "trackData:\n  title: Track\n  artist: Artist\n  albumartist: Artist\n  album: Album\n  genre: Classic Rock\n  year: 1995\n"
 STREAMING_ENTRY = (
     "streamingService: spotify\n"
     "        trackUrl: https://open.spotify.com/track/example-track\n"
@@ -483,6 +484,90 @@ def test_albumartist_fallback_requires_album_directory(tmp_path: Path) -> None:
     assert track.read_text() == original
 
 
+@pytest.mark.parametrize("original_genre", ["", "genre: ''\n", "genre: made-up\n"])
+@pytest.mark.parametrize("model_genre", ["genre: ''\n", "", "genre: invented\n"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_genre_fallback_uses_neighboring_tracks(
+    track: Path, original_genre: str, model_genre: str, dry_run: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    original = CORE.replace("  genre: Classic Rock\n", f"  {original_genre}" if original_genre else "")
+    response = COMPLETE.replace("  genre: Classic Rock\n", f"  {model_genre}" if model_genre else "")
+    track.write_text(original, encoding="utf-8")
+    (track.parent / "02 - Neighbor.yml").write_text("trackData:\n  genre: Jazz\n", encoding="utf-8")
+    other_album = track.parent.parent / "Other [2000]"
+    other_album.mkdir()
+    media = ID3()
+    media.add(TCON(encoding=3, text=["Jazz"]))
+    media.save(other_album / "03 - Neighbor.mp3")
+    with caplog.at_level(logging.INFO):
+        assert populate.process_track_yaml_file(
+            track, "", 1, 1, client=cast(OpenAI, make_client(response)), dry_run=dry_run,
+        )
+    assert "Inferred artist genre 'Jazz'" in caplog.text
+    if dry_run:
+        assert track.read_text(encoding="utf-8") == original
+        assert not track.with_name(track.name + ".bak").exists()
+    else:
+        assert load_track_yaml_file(track).track_data.genre == "Jazz"
+        assert track.with_name(track.name + ".bak").read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("original_genre", ["", "genre: invalid\n"])
+def test_valid_model_genre_replaces_missing_or_invalid_original(
+    track: Path, monkeypatch: pytest.MonkeyPatch, original_genre: str,
+) -> None:
+    original = CORE.replace("  genre: Classic Rock\n", f"  {original_genre}" if original_genre else "")
+    track.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(populate, "infer_genre_from_neighbors", MagicMock(side_effect=AssertionError("unexpected scan")))
+    assert populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(COMPLETE)))
+    assert load_track_yaml_file(track).track_data.genre == "Classic Rock"
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_invalid_genre_without_neighbors_is_not_saved(
+    track: Path, caplog: pytest.LogCaptureFixture, dry_run: bool,
+) -> None:
+    original = CORE.replace("genre: Classic Rock", "genre: invalid")
+    track.write_text(original, encoding="utf-8")
+    response = COMPLETE.replace("genre: Classic Rock", "genre: invented")
+    assert not populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(response)), dry_run=dry_run)
+    assert track.read_text(encoding="utf-8") == original
+    assert not track.with_name(track.name + ".bak").exists()
+    assert "No valid genre" in caplog.text
+
+
+def test_invalid_existing_genre_does_not_allow_other_metadata_changes(track: Path) -> None:
+    original = CORE.replace("genre: Classic Rock", "genre: invalid")
+    track.write_text(original, encoding="utf-8")
+    response = COMPLETE.replace("title: Track", "title: Different")
+    assert not populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(response)))
+    assert track.read_text(encoding="utf-8") == original
+    assert not track.with_name(track.name + ".bak").exists()
+
+
+def test_complete_file_with_invalid_genre_is_processed(track: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = COMPLETE.replace("genre: Classic Rock", "genre: invalid")
+    track.write_text(original, encoding="utf-8")
+    client = make_client(COMPLETE)
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, client))
+    assert populate.main_loop(0, specific_file=track)
+    assert client.chat.completions.create.call_count == 1
+    assert load_track_yaml_file(track).track_data.genre == "Classic Rock"
+    assert track.with_name(track.name + ".bak").read_text(encoding="utf-8") == original
+
+
+def test_valid_existing_genre_cannot_be_changed_by_inference(
+    track: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = COMPLETE.replace("genre: Classic Rock", "genre: invented")
+    infer = MagicMock(return_value="Classic Rock")
+    monkeypatch.setattr(populate, "infer_genre_from_neighbors", infer)
+    assert not populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(response)))
+    assert track.read_text(encoding="utf-8") == CORE
+    infer.assert_not_called()
+
+
 @pytest.mark.parametrize("response", [
     COMPLETE.replace("albumartist: Artist", "albumartist: 42"),
     COMPLETE.replace("  albumartist: Artist\n", "") + "  invalid: field\n",
@@ -503,7 +588,7 @@ def test_albumartist_fallback_survives_model_failure(
     original = CORE.replace("albumartist: Artist", 'albumartist: ""')
     track.write_text(original)
     if failure == "changed":
-        response = COMPLETE.replace("genre: Rock", "genre: Folk")
+        response = COMPLETE.replace("genre: Classic Rock", "genre: Folk")
     else:
         response = COMPLETE + "  unknownId: invalid\n"
     client = make_client(response)
@@ -522,7 +607,7 @@ def test_albumartist_fallback_survives_model_failure(
     else:
         result = load_track_yaml_file(track)
         assert result.track_data.albumartist == "Artist"
-        assert result.track_data.genre == "Rock"
+        assert result.track_data.genre == "Classic Rock"
         assert track.with_name(track.name + ".bak").read_text() == original
     assert "albumartist: Artist" in client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
 

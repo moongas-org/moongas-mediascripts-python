@@ -1,6 +1,8 @@
 """Batch update known artist metadata corrections in artist.yml files."""
 
 import argparse
+import shlex
+import shutil
 from pathlib import Path
 
 from mediascan.types.artist.artist_yaml_file_loader import load_artist_yaml_file
@@ -67,7 +69,13 @@ def reformat_artist_yaml(artist_yaml_path: Path, reformat_all: bool = False) -> 
             reformat_applicable = True
 
     if reformat_applicable:
+        backup_path = artist_yaml_path.with_name(f"{artist_yaml_path.name}.bak")
+        shutil.copy2(artist_yaml_path, backup_path)
         artist_yaml_path.write_text(artist_file.to_yaml(allow_unicode=True), encoding="utf-8")
+        print(
+            shlex.join(["meld", str(backup_path.resolve()), str(artist_yaml_path.resolve())]),
+            flush=True,
+        )
     return reformat_applicable
 
 

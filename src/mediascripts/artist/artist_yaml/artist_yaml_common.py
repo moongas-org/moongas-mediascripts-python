@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from dataclass_wizard.v0.errors import MissingFields
@@ -55,17 +56,16 @@ def load_artist_paths_from_database(parser: argparse.ArgumentParser) -> dict[str
     return artist_paths
 
 
-def load_reference_examples(collection_data_path: Path, letters_dirs_to_work: list[str]) -> str:
+def load_reference_examples(
+    collection_data_path: Path, reference_artist_dir_pattern: str,
+    exclude_files: set[Path] | None = None,
+) -> str:
     """Load complete YAML files that demonstrate the desired output format.
-    Currently it recursively loads all artist.yaml files under the EXAMPLES_ROOTDIR
-    Only files named "artist.yml" in directories starting with "A" are considered.
-    This avoids maximum context length issues by limiting the number of examples loaded.
-    Also the ones starting with the letter 'A' are considered the primary examples
-    because I tagged them semi-manually using Copilot Chat first.
+    Match artist directory basenames with a shell-style glob.
     """
     logger.info(
-        "Loading reference examples from directories starting with letters: %s",
-        letters_dirs_to_work,
+        "Loading reference examples matching artist directory pattern: %s",
+        reference_artist_dir_pattern,
     )
 
     if not collection_data_path.is_dir():
@@ -74,7 +74,10 @@ def load_reference_examples(collection_data_path: Path, letters_dirs_to_work: li
     else:
         logger.info("Reference examples directory found: %s", collection_data_path)
 
-    example_paths = load_input_files(collection_data_path, letters_dirs_to_work)
+    example_paths = [
+        path for path in load_input_files(collection_data_path, reference_artist_dir_pattern)
+        if exclude_files is None or path.resolve() not in exclude_files
+    ]
 
     logger.info("Found %d reference example file(s)", len(example_paths))
 
@@ -98,13 +101,13 @@ def load_reference_examples(collection_data_path: Path, letters_dirs_to_work: li
     return reference_text
 
 
-def load_input_files(collection_data_path: Path, letters_dirs_to_work: list[str]) -> list[Path]:
-    """Find artist.yml files in directories selected by their first letter."""
+def load_input_files(collection_data_path: Path, artist_dir_pattern: str = "*") -> list[Path]:
+    """Find artist.yml files in directories whose basenames match a glob."""
     input_paths = [
         Path(root) / filename
         for root, _, filenames in os.walk(collection_data_path, followlinks=True)
         for filename in filenames
-        if filename == "artist.yml" and os.path.basename(root) and os.path.basename(root)[0].upper() in letters_dirs_to_work
+        if filename == "artist.yml" and fnmatchcase(os.path.basename(root), artist_dir_pattern)
     ]
 
     input_paths = sorted(input_paths)
