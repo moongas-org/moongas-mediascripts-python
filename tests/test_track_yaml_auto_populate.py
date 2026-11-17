@@ -437,6 +437,113 @@ def test_blank_metadata_can_be_filled(value: str | None) -> None:
     populate.preserve_existing_values({"trackIdData": None}, {})
 
 
+@pytest.mark.parametrize("model_value", ["", "  albumartist: null\n", "  albumartist: '  '\n"])
+@pytest.mark.parametrize("original_value", ["", "  albumartist: null\n", "  albumartist: '  '\n"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_missing_albumartist_uses_unescaped_artist_directory(
+    tmp_path: Path, model_value: str, original_value: str, dry_run: bool, capsys: pytest.CaptureFixture[str],
+) -> None:
+    album = tmp_path / "Mama's_Broke" / "Count the Wicked [2017]"
+    album.mkdir(parents=True)
+    track = album / "01 - Track.yml"
+    original = CORE.replace("  albumartist: Artist\n", original_value)
+    track.write_text(original)
+    response = COMPLETE.replace("  albumartist: Artist\n", model_value)
+    assert populate.process_track_yaml_file(
+        track, "", 1, 1, client=cast(OpenAI, make_client(response)), dry_run=dry_run,
+    )
+    if dry_run:
+        assert track.read_text() == original
+        assert "LLM Result = \"Mama's.Broke\"" in capsys.readouterr().out
+    else:
+        result = load_track_yaml_file(track)
+        assert result.track_data.albumartist == "Mama's.Broke"
+        assert track.with_name(track.name + ".bak").read_text() == original
+
+
+def test_albumartist_fallback_does_not_override_model_or_existing_metadata(track: Path) -> None:
+    track.write_text(CORE.replace("albumartist: Artist", 'albumartist: ""'))
+    response = COMPLETE.replace("albumartist: Artist", "albumartist: Model Artist")
+    assert populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(response)))
+    assert load_track_yaml_file(track).track_data.albumartist == "Model Artist"
+    original = CORE.replace("albumartist: Artist", "albumartist: Original Artist")
+    track.write_text(original)
+    assert not populate.process_track_yaml_file(
+        track, "", 1, 1, client=cast(OpenAI, make_client(COMPLETE.replace("  albumartist: Artist\n", "")))
+    )
+    assert track.read_text() == original
+
+
+def test_albumartist_fallback_requires_album_directory(tmp_path: Path) -> None:
+    track = tmp_path / "track.yml"
+    original = CORE.replace("albumartist: Artist", 'albumartist: ""')
+    track.write_text(original)
+    response = COMPLETE.replace("  albumartist: Artist\n", "")
+    assert not populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(response)))
+    assert track.read_text() == original
+
+
+@pytest.mark.parametrize("response", [
+    COMPLETE.replace("albumartist: Artist", "albumartist: 42"),
+    COMPLETE.replace("  albumartist: Artist\n", "") + "  invalid: field\n",
+])
+def test_albumartist_fallback_does_not_hide_invalid_model_output(track: Path, response: str) -> None:
+    original = CORE.replace("albumartist: Artist", 'albumartist: ""')
+    track.write_text(original)
+    assert not populate.process_track_yaml_file(track, "", 1, 1, client=cast(OpenAI, make_client(response)))
+    assert load_track_yaml_file(track).track_data.albumartist == "Artist"
+    assert track.with_name(track.name + ".bak").read_text() == original
+
+
+@pytest.mark.parametrize("failure", ["changed", "invalid-identifiers", "api"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_albumartist_fallback_survives_model_failure(
+    track: Path, failure: str, dry_run: bool, caplog: pytest.LogCaptureFixture,
+) -> None:
+    original = CORE.replace("albumartist: Artist", 'albumartist: ""')
+    track.write_text(original)
+    if failure == "changed":
+        response = COMPLETE.replace("genre: Rock", "genre: Folk")
+    else:
+        response = COMPLETE + "  unknownId: invalid\n"
+    client = make_client(response)
+    if failure == "api":
+        client.chat.completions.create.side_effect = APIConnectionError(request=MagicMock())
+    with caplog.at_level(logging.ERROR):
+        assert not populate.process_track_yaml_file(
+            track, "", 1, 1, client=cast(OpenAI, client), dry_run=dry_run,
+        )
+    assert "Could not populate track YAML" in caplog.text
+    if failure == "changed":
+        assert "Model changed existing track metadata at trackData.genre" in caplog.text
+    if dry_run:
+        assert track.read_text() == original
+        assert not track.with_name(track.name + ".bak").exists()
+    else:
+        result = load_track_yaml_file(track)
+        assert result.track_data.albumartist == "Artist"
+        assert result.track_data.genre == "Rock"
+        assert track.with_name(track.name + ".bak").read_text() == original
+    assert "albumartist: Artist" in client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+
+
+def test_cli_albumartist_fallback_in_album_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    album = tmp_path / "Mama's Broke" / "Count the Wicked [2017]"
+    album.mkdir(parents=True)
+    track = album / "01 - Track.yml"
+    original = CORE.replace("albumartist: Artist", 'albumartist: ""')
+    track.write_text(original)
+    response = COMPLETE.replace("albumartist: Artist", 'albumartist: ""')
+    client = make_client(response)
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, client))
+    monkeypatch.setattr(sys, "argv", ["track-yaml-auto-populate", "-d", str(album)])
+    assert populate.main() == 0
+    assert load_track_yaml_file(track).track_data.albumartist == "Mama's Broke"
+    assert track.with_name(track.name + ".bak").read_text() == original
+
+
 @pytest.mark.parametrize("status", [410, 429, 500, None])
 def test_provider_failures_leave_source_unchanged(track: Path, caplog: pytest.LogCaptureFixture, status: int | None) -> None:
     client = make_client(COMPLETE)

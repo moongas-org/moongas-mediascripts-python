@@ -672,6 +672,14 @@ and `acoustidData` results. Tracks with valid core metadata and at least one
 non-empty streaming track ID or URL are skipped unless `--force` is used.
 The LLM must preserve `mediaFileData` exactly; it cannot add or change audio
 fingerprints, local-file metadata, or AcoustID data.
+If the original `trackData.albumartist` is missing or blank, the command fills
+it from the artist directory name for tracks in recognized album directories
+before requesting the model. It saves this local fallback with a backup even
+if the model request or response subsequently fails; model output is still
+validated separately. If the original is non-empty, it is never replaced.
+As with media tagging, underscores in directory names are converted back to
+periods; this conversion is best-effort and may be lossy. Dry runs preview the
+fallback without saving, and `--llm=false` still makes no changes.
 Up to three complete files in the selected scope serve as reference examples.
 Pending tracks are shuffled and processed once per run, with 30 seconds between
 requests by default. `--llm=false` only checks files, without creating a client

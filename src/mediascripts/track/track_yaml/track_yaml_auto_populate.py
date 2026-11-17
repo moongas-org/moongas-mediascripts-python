@@ -27,6 +27,7 @@ from yaml.error import YAMLError as PyYAMLError
 from mediascripts.common.cli.parse_boolean import parse_boolean
 from mediascripts.common.files import shuffled_files
 from mediascripts.common.openai.client import MODEL_NAME, get_client
+from mediascripts.mediafile.auto_tag_media_file import unescape_name
 from mediascripts.track.track_yaml.track_yaml_common import (
     TextWriter,
     format_field_diff,
@@ -104,6 +105,42 @@ def normalize_model_identifiers(content: str) -> str:
     return stream.getvalue().strip()
 
 
+def fill_albumartist_from_directory(
+    content: str, original: Mapping[str, object], input_path: Path
+) -> str:
+    original_data = original.get("trackData")
+    if original_data is not None and not is_mapping(original_data):
+        return content
+    existing = original_data.get("albumartist") if is_mapping(original_data) else None
+    if existing is not None and (not isinstance(existing, str) or existing.strip()):
+        return content
+
+    document = load_document(content)
+    track_data = document.get("trackData")
+    if not is_mapping(track_data):
+        return content
+    value = track_data.get("albumartist")
+    if value is not None and (not isinstance(value, str) or value.strip()):
+        return content
+    album_path = AlbumPathBuilder.of(input_path.parent)
+    artist = unescape_name(album_path.artist_dirname)
+    if not album_path.valid or not artist:
+        return content
+
+    yaml = cast(_YamlLoader, YAML())
+    round_trip = yaml.load(content)
+    if not is_mapping(round_trip):
+        raise ValueError("Model response does not contain a trackData mapping")
+    round_trip_data = round_trip.get("trackData")
+    if not is_mapping(round_trip_data):
+        raise ValueError("Model response does not contain a trackData mapping")
+    round_trip_data["albumartist"] = artist
+    stream = StringIO()
+    yaml.dump(round_trip, stream)
+    logger.info("[%s] Using artist directory as albumartist: %r", input_path, artist)
+    return stream.getvalue().strip()
+
+
 def has_identifiers(document: Mapping[str, object]) -> bool:
     identifiers = document.get("trackIdData")
     if not is_mapping(identifiers):
@@ -121,13 +158,14 @@ def has_identifiers(document: Mapping[str, object]) -> bool:
     return False
 
 
-def preserve_existing_values(original: object, completed: object) -> None:
+def preserve_existing_values(original: object, completed: object, path: str = "") -> None:
     """Reject a response that removes or changes known source metadata."""
     if is_mapping(original):
         if not is_mapping(completed):
-            raise ValueError("Model removed existing metadata")
+            raise ValueError(f"Model removed existing metadata at {path or '<root>'}")
         for key, value in original.items():
-            preserve_existing_values(value, completed.get(key))
+            child_path = f"{path}.{key}" if path else key
+            preserve_existing_values(value, completed.get(key), child_path)
     elif is_list(original) and original:
         if not is_list(completed):
             raise ValueError("Model removed existing identifiers")
@@ -138,7 +176,7 @@ def preserve_existing_values(original: object, completed: object) -> None:
                     if not is_mapping(candidate):
                         continue
                     try:
-                        preserve_existing_values(entry, candidate)
+                        preserve_existing_values(entry, candidate, path)
                     except ValueError:
                         continue
                     preserved = True
@@ -152,7 +190,7 @@ def preserve_existing_values(original: object, completed: object) -> None:
         and not (isinstance(original, str) and not original.strip())
         and original != completed
     ):
-        raise ValueError("Model changed existing track metadata")
+        raise ValueError(f"Model changed existing track metadata at {path or '<root>'}")
 
 
 def load_input_files(path: Path, album_directories_only: bool = True) -> list[Path]:
@@ -214,11 +252,32 @@ def process_track_yaml_file(
         if client is None:
             raise ValueError("LLM lookup enabled but no client was provided")
         original = load_document(raw_yaml) if raw_yaml.strip() else {}
+        local_yaml = (
+            fill_albumartist_from_directory(raw_yaml, original, input_path)
+            if raw_yaml.strip()
+            else raw_yaml
+        )
+        fallback_applied = local_yaml != raw_yaml
+        backup_path = input_path.with_name(f"{input_path.name}.bak")
+        if fallback_applied:
+            show_yaml_file_diff(input_path, raw_yaml, local_yaml + "\n")
+            if dry_run:
+                logger.info("[%s] [dry-run] Album artist fallback not saved", input_path)
+            else:
+                def write_local_yaml(stream: TextWriter) -> None:
+                    stream.write(local_yaml + "\n")
+
+                save_yaml_atomically(input_path, write_local_yaml, backup_path)
+                logger.info(
+                    "[%s] Saved album artist fallback; original backed up to %s",
+                    input_path,
+                    backup_path,
+                )
         prompt = (
             f"Reference examples:\n{reference_examples}\n\n"
             if reference_examples
             else ""
-        ) + f"Fill in this track YAML file (path: {input_path}):\n\n{raw_yaml}"
+        ) + f"Fill in this track YAML file (path: {input_path}):\n\n{local_yaml}"
         logger.info("[%s] Sending request to model %s", input_path, MODEL_NAME)
         response = client.chat.completions.create(
             model=MODEL_NAME,
@@ -233,11 +292,16 @@ def process_track_yaml_file(
         completed_yaml = normalize_model_identifiers(
             response.choices[0].message.content.strip()
         )
+        completed_yaml = fill_albumartist_from_directory(
+            completed_yaml, original, input_path
+        )
         completed = validate_track_yaml_content(completed_yaml)
         preserve_existing_values(original, completed)
         if original.get("mediaFileData") != completed.get("mediaFileData"):
             raise ValueError("Model added, removed, or changed mediaFileData")
-        if completed_yaml == raw_yaml.strip():
+        if completed_yaml == raw_yaml.strip() or (
+            fallback_applied and not dry_run and completed_yaml == local_yaml.strip()
+        ):
             logger.info(
                 "[%s] Model result unchanged; leaving file untouched", input_path
             )
@@ -277,8 +341,9 @@ def process_track_yaml_file(
         def write_completed_yaml(stream: TextWriter) -> None:
             stream.write(completed_yaml + "\n")
 
-        backup_path = input_path.with_name(f"{input_path.name}.bak")
-        save_yaml_atomically(input_path, write_completed_yaml, backup_path)
+        save_yaml_atomically(
+            input_path, write_completed_yaml, None if fallback_applied else backup_path
+        )
         logger.info(
             "[%s] Saved track YAML; original backed up to %s", input_path, backup_path
         )
