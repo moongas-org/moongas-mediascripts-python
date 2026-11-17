@@ -787,8 +787,11 @@ error, not a guessed selection. If the exact artist/title query
 returns no candidates, it tries accent-normalized, fuzzy word searches with the
 artist filter, then without it. Each strategy returns at most ten candidates;
 the LLM must still reject unrelated artists, recordings and editions.
-Selected IDs must exist in those
-results, and a requested track must occur on the selected release. Album requests
+The LLM selects from numbered recording/release pairs rather than copying
+MusicBrainz IDs; the command resolves those numbers back to the original
+catalogue IDs. Invalid selections are retried up to three times, then the
+request remains in the input file with a warning. A requested track must occur
+on the selected release. Album requests
 expand into every track on the selected release, not just its title track.
 Track titles, artist credits, album titles, years and disc/track positions come
 from MusicBrainz; genre is supplied by the LLM. Requests without a convincing

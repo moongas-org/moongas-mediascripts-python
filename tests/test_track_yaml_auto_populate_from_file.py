@@ -57,10 +57,9 @@ def install_lookup(
     monkeypatch: pytest.MonkeyPatch, release: dict[str, object], kind: str = "album",
 ) -> tuple[MagicMock, MagicMock]:
     intent = f"kind: {kind}\nartist: Artist\ntitle: Album\n"
-    selection = f"releaseId: {RELEASE_ID}\ngenre: Rock\n"
+    selection = "option: 1\ngenre: Rock\n"
     candidates: dict[str, object] = {"releases": [{"id": RELEASE_ID, "title": "Album"}]}
     if kind == "track":
-        selection += f"recordingId: {RECORDING_ID}\n"
         candidates = {"recordings": [{
             "id": RECORDING_ID, "title": "First", "releases": [{"id": RELEASE_ID}],
         }]}
@@ -274,7 +273,7 @@ def test_untrusted_or_unresolved_selection_rejected(
 ) -> None:
     client, network = install_lookup(monkeypatch, release)
     client.chat.completions.create.side_effect = model_client(
-        "kind: album\nartist: Artist\ntitle: Album", selection,
+        "kind: album\nartist: Artist\ntitle: Album", *([selection] * populate.MAX_SELECTION_ATTEMPTS),
     ).chat.completions.create.side_effect
     with pytest.raises(ValueError):
         populate.resolve_request("Album by Artist", cast(OpenAI, client), populate.MusicBrainz())
@@ -287,11 +286,101 @@ def test_recording_must_belong_to_search_results(
     client, network = install_lookup(monkeypatch, release, kind="track")
     client.chat.completions.create.side_effect = model_client(
         "kind: track\nartist: Artist\ntitle: First",
-        f"releaseId: {RELEASE_ID}\nrecordingId: {OTHER_ID}\ngenre: Rock",
+        *([f"releaseId: {RELEASE_ID}\nrecordingId: {OTHER_ID}\ngenre: Rock"] * populate.MAX_SELECTION_ATTEMPTS),
     ).chat.completions.create.side_effect
     with pytest.raises(ValueError, match="recording absent"):
         populate.resolve_request("First by Artist", cast(OpenAI, client), populate.MusicBrainz())
     assert network.call_count == 1
+
+
+def test_numbered_selection_maps_to_catalogue_ids_and_removes_queue_entry(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist - First\n")
+    client, network = install_lookup(monkeypatch, release, kind="track")
+    client.chat.completions.create.side_effect = model_client(
+        "kind: track\nartist: Artist\ntitle: First",
+        "option: 1\ngenre: Rock",
+    ).chat.completions.create.side_effect
+    assert populate.main_loop(source, tmp_path / "Music")
+    assert source.read_text() == ""
+    assert (tmp_path / "Music/Artist/Album [1995]/01 - First.yml").is_file()
+    prompt = client.chat.completions.create.call_args_list[1].kwargs["messages"][1]["content"]
+    assert '"option": 1' in prompt
+    assert RECORDING_ID not in prompt
+    assert RELEASE_ID not in prompt
+    assert f"/release/{RELEASE_ID}?" in network.call_args_list[1].args[0].full_url
+
+
+def test_invalid_selection_retries_and_can_recover(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist - First\n")
+    client, network = install_lookup(monkeypatch, release, kind="track")
+    client.chat.completions.create.side_effect = model_client(
+        "kind: track\nartist: Artist\ntitle: First",
+        "option: 9\ngenre: Rock",
+        "option: 1\ngenre: Rock",
+    ).chat.completions.create.side_effect
+    with caplog.at_level(logging.WARNING):
+        assert populate.main_loop(source, tmp_path / "Music")
+    assert source.read_text() == ""
+    assert client.chat.completions.create.call_count == 3
+    assert "retry" in caplog.text.lower()
+    assert network.call_count == 2
+
+
+@pytest.mark.parametrize("bad_option", ["0", "2", "true", "'1'", "-1"])
+def test_invalid_options_leave_input_unchanged(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, bad_option: str,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist - First\n")
+    client, network = install_lookup(monkeypatch, release, kind="track")
+    client.chat.completions.create.side_effect = model_client(
+        "kind: track\nartist: Artist\ntitle: First",
+        *([f"option: {bad_option}\ngenre: Rock"] * populate.MAX_SELECTION_ATTEMPTS),
+    ).chat.completions.create.side_effect
+    assert not populate.main_loop(source, tmp_path / "Music")
+    assert source.read_text() == "Artist - First\n"
+    assert network.call_count == 1
+    assert "after 3 selection attempts" in caplog.text
+    assert not (tmp_path / "Music").exists()
+
+
+def test_numbered_selection_preserves_recording_release_pair() -> None:
+    candidates: list[dict[str, object]] = [
+        {"id": RECORDING_ID, "title": "First", "artist-credit": [{"artist": {"id": OTHER_ID, "name": "Artist"}}],
+         "releases": [{"id": RELEASE_ID, "title": "First release"}]},
+        {"id": OTHER_ID, "title": "First (live)", "releases": [{"id": OTHER_ID, "title": "Live"}]},
+    ]
+    options, identifiers = populate.selection_options(candidates, "track")
+    assert [option["option"] for option in options] == [1, 2]
+    assert RECORDING_ID not in json.dumps(options)
+    assert OTHER_ID not in json.dumps(options)
+    assert populate.select_catalogue_option(
+        cast(OpenAI, model_client("option: 2\ngenre: Rock")), "options", identifiers, "track"
+    ) == (OTHER_ID, OTHER_ID, "Rock")
+
+
+def test_invalid_legacy_recording_id_retries_without_looking_up_wrong_recording(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist - First\n")
+    client, network = install_lookup(monkeypatch, release, kind="track")
+    client.chat.completions.create.side_effect = model_client(
+        "kind: track\nartist: Artist\ntitle: First",
+        f"recordingId: {OTHER_ID}\nreleaseId: {RELEASE_ID}\ngenre: Rock",
+        "option: 1\ngenre: Rock",
+    ).chat.completions.create.side_effect
+    assert populate.main_loop(source, tmp_path / "Music")
+    assert source.read_text() == ""
+    assert network.call_count == 2
+    assert f"/release/{RELEASE_ID}?" in network.call_args_list[1].args[0].full_url
 
 
 def test_network_failure_reported_per_line(
@@ -678,7 +767,7 @@ def test_fenced_intent_and_selection_complete_successfully(
     client, _ = install_lookup(monkeypatch, release, kind="track")
     client.chat.completions.create.side_effect = model_client(
         f"```{language}\nkind: track\nartist: Winterkalte\ntitle: The Fate of the Sea\n```",
-        f"```{language}\nreleaseId: {RELEASE_ID}\nrecordingId: {RECORDING_ID}\ngenre: Industrial\n```",
+        f"```{language}\noption: 1\ngenre: Industrial\n```",
     ).chat.completions.create.side_effect
     assert populate.main_loop(source, tmp_path / "Music")
     assert source.read_text() == ""
@@ -935,7 +1024,7 @@ def test_artist_only_selects_highest_listen_count(
     client = model_client(
         "kind: artist\nartist: Artist",
         f"artistId: {artist_id}",
-        f"releaseId: {RELEASE_ID}\nrecordingId: {RECORDING_ID}\ngenre: Rock",
+        "option: 1\ngenre: Rock",
     )
     monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, client))
     responses = [
