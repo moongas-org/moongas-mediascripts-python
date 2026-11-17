@@ -731,12 +731,18 @@ Also runs as `python -m mediascripts.track.track_yaml.track_yaml_auto_populate`.
 
 `track-yaml-auto-populate-from-file` reads a UTF-8 text file in order, ignoring
 blank lines. `--file` defaults to `$MOONGAS_COLLECTION_ROOTDIR/todo.txt`;
-specify `--file` to use another input file. Each non-empty line describes one
-desired track or album, for example:
+specify `--file` to use another input file. Each non-empty line normally
+describes one desired track. The word `album` (case-insensitive) requests the
+entire album; an artist-only request selects that artist's most-listened track
+according to ListenBrainz:
 
 ```text
 Nirvana - Come As You Are (track)
 Portishead - Dummy (album)
+Nirvana
+https://www.youtube.com/watch?v=vabnZ9-ex7o
+https://www.youtube.com/playlist?list=PLAYLIST_ID
+https://www.shazam.com/song/SONG_ID/SONG_SLUG
 ```
 
 Install the LLM extras (`uv sync --extra llm`) and configure the same
@@ -768,7 +774,16 @@ are replaced with underscores; original metadata spelling is retained inside YAM
 Existing artist/album YAML files are left untouched; no audio is downloaded.
 
 The OpenAI-compatible LLM interprets each line, then selects a recording and
-release from live MusicBrainz search results. If the exact artist/title query
+release from live MusicBrainz search results. YouTube playlist URLs request a
+full album; YouTube video and Shazam song URLs request a single track, even
+when their URL contains `album`. A YouTube watch URL with a `list` parameter is
+a video request; use `/playlist?list=...` for the playlist. The command fetches
+public URL metadata to identify the request; inaccessible or ambiguous pages
+remain in the input file with a warning. A playlist must be identifiable as an
+album; arbitrary mixed playlists are not imported as a collection of videos.
+Artist-only requests resolve the artist via MusicBrainz and choose the recording
+with the highest ListenBrainz total listen count; missing popularity data is an
+error, not a guessed selection. If the exact artist/title query
 returns no candidates, it tries accent-normalized, fuzzy word searches with the
 artist filter, then without it. Each strategy returns at most ten candidates;
 the LLM must still reject unrelated artists, recordings and editions.
@@ -786,9 +801,18 @@ strict YAML parsing; surrounding prose, multiple blocks, and invalid YAML remain
 errors.
 
 Every proposed track passes the mediascan `TrackYamlFile` validator before
-writing. Existing `.yml` or `.yaml` files are skipped by default. `--force`
+writing. For single-track requests, the command scans the destination and all
+configured collection `mediaDirs` for existing track YAML or tagged media with
+matching artist and title (case- and whitespace-insensitive); a match is
+skipped and counts as success. This is a metadata match, not a recording-ID
+comparison, so distinct recordings with identical artist and title cannot be
+distinguished. Unreadable files are reported as warnings. Scanning large
+collections may take time. Album requests create the requested album's track
+files even when the same songs exist on another release.
+Existing destination `.yml` or `.yaml` files are skipped by default. `--force`
 refreshes their six core fields while retaining streaming identifiers and
-`mediaFileData`, and saves the original as `.yml.bak` or `.yaml.bak`.
+`mediaFileData`, and saves the original as `.yml.bak` or `.yaml.bak`; it does
+not overwrite a matching track elsewhere in the collection.
 Ambiguous duplicate `.yml`/`.yaml` paths, symlink output files, and directory
 symlinks leading outside the destination are rejected. New files are published
 atomically without overwriting files that appear during processing.
@@ -811,7 +835,7 @@ the previous run's backup. After successfully handling all track files for a
 line, it atomically removes that particular line from the input. Existing track
 files skipped without `--force` also count as successfully handled.
 Failed, unprocessed, and blank lines remain, preserving their order, whitespace,
-line endings, and UTF-8 BOM if present. Each failed line is logged with its
+line endings, and UTF-8 BOM if present. Each failed line is logged as a warning with its
 original source line number, and later lines are still attempted. Progress is
 saved after each successful line so an interruption leaves pending work intact.
 `--dry-run`, `--llm=false`, and `--count 0` leave both the input and its backup
@@ -831,7 +855,8 @@ Debug logs can contain input and music metadata; review them before sharing.
 Credentials and authorization headers are not logged by this script.
 Exit status is 0 on success, 1 if any line fails, or 130 if interrupted.
 Lookups send each request to the configured LLM provider and artist/title
-searches to MusicBrainz; dry runs still make these requests and may incur
+searches to MusicBrainz; artist-only requests also query ListenBrainz, and URLs
+are looked up on their respective providers. Dry runs still make these requests and may incur
 provider charges.
 Also runs as
 `python -m mediascripts.track.track_yaml.track_yaml_auto_populate_from_file`.

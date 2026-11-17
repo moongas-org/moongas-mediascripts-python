@@ -15,6 +15,7 @@ import pytest
 from mediascan.types.album.album_path import AlbumPathBuilder
 from mediascan.types.track.track_yaml_file_loader import load_track_yaml_file
 from mediascan.types.track.track_yaml_file_validator import validate_track_yaml_content
+from mutagen.id3 import ID3, TIT2, TPE1
 from openai import OpenAI
 
 from mediascripts.track.track_yaml import track_yaml_auto_populate_from_file as populate
@@ -835,10 +836,235 @@ def test_broad_search_can_be_rejected_without_writing(
         "kind: album\nartist: Unknown\ntitle: Title", "error: Results belong to another artist",
     ).chat.completions.create.side_effect
     network.side_effect = [
-        BytesIO(b'{"releases": []}'), BytesIO(b'{"releases": []}'),
-        BytesIO(json.dumps({"releases": [{"id": RELEASE_ID, "title": "Unrelated"}]}).encode()),
+        BytesIO(b'{"recordings": []}'), BytesIO(b'{"recordings": []}'),
+        BytesIO(json.dumps({"recordings": [{"id": RECORDING_ID, "title": "Unrelated"}]}).encode()),
     ]
     assert not populate.main_loop(source, tmp_path / "Music")
     assert network.call_count == 3
     assert source.read_text() == "Unknown - Title\n"
     assert not (tmp_path / "Music").exists()
+
+
+@pytest.mark.parametrize(("input_text", "model_kind", "expected"), [
+    ("Artist - First", "album", "recording"),
+    ("Artist - First (ALBUM)", "track", "release"),
+])
+def test_text_scope_is_determined_by_explicit_album_word(
+    input_text: str, model_kind: str, expected: str, monkeypatch: pytest.MonkeyPatch,
+    release: dict[str, object],
+) -> None:
+    client, network = install_lookup(monkeypatch, release, kind="track" if expected == "recording" else "album")
+    responses = list(client.chat.completions.create.side_effect)
+    responses[0].choices[0].message.content = f"kind: {model_kind}\nartist: Artist\ntitle: First\n"
+    client.chat.completions.create.side_effect = responses
+    _, recording_id, _ = populate.resolve_request(input_text, cast(OpenAI, client), populate.MusicBrainz())
+    assert (recording_id is not None) == (expected == "recording")
+    assert f"/{expected}?" in network.call_args_list[0].args[0].full_url
+
+
+@pytest.mark.parametrize(("url", "payload", "kind", "metadata"), [
+    ("https://www.youtube.com/watch?v=vabnZ9-ex7o&list=PLabc",
+     b'{"title": "Artist - Track", "author_name": "Artist"}', "track", "Artist - Track"),
+    ("https://youtu.be/vabnZ9-ex7o",
+     b'{"title": "Artist - Track", "author_name": "Artist"}', "track", "Artist - Track"),
+    ("https://www.youtube.com/playlist?list=PLabc",
+     b'<script>"playlistMetadataRenderer":{"title":"Artist - Album"}</script>', "album", "Artist - Album"),
+    ("https://www.shazam.com/song/123456/some-album",
+     b'<link rel="canonical" href="https://www.shazam.com/song/123456/track">'
+     b'<meta property="og:title" content="Track - Artist &amp; Guest">', "track", "Track - Artist & Guest"),
+])
+def test_url_metadata_and_scope(
+    url: str, payload: bytes, kind: str, metadata: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    network = MagicMock(return_value=BytesIO(payload))
+    monkeypatch.setattr(populate, "urlopen", network)
+    result_kind, result_metadata = populate.request_url_metadata(url)
+    assert result_kind == kind
+    assert metadata in result_metadata
+    assert network.call_count == 1
+
+
+@pytest.mark.parametrize("url", [
+    "https://youtube.com.evil.example/watch?v=vabnZ9-ex7o",
+    "https://www.youtube.com/playlist?list=../../etc",
+    "https://www.shazam.com/song/not-a-number",
+    "https://user@www.youtube.com/watch?v=vabnZ9-ex7o",
+    "file:///etc/passwd",
+])
+def test_unsupported_urls_are_rejected_without_fetch(url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    network = MagicMock()
+    monkeypatch.setattr(populate, "urlopen", network)
+    with pytest.raises(ValueError):
+        populate.request_url_metadata(url)
+    network.assert_not_called()
+
+
+def test_shazam_rejects_unrelated_canonical_song(monkeypatch: pytest.MonkeyPatch) -> None:
+    page = (
+        b'<link rel="canonical" href="https://www.shazam.com/song/999/other">'
+        b'<meta property="og:title" content="Unrelated - Artist">'
+    )
+    monkeypatch.setattr(populate, "urlopen", MagicMock(return_value=BytesIO(page)))
+    with pytest.raises(ValueError, match="different or unknown song"):
+        populate.request_url_metadata("https://www.shazam.com/song/123/track")
+
+
+def test_unavailable_popularity_keeps_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    artist_id = "44444444-4444-4444-8444-444444444444"
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist\n")
+    client = model_client("kind: artist\nartist: Artist", f"artistId: {artist_id}")
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, client))
+    monkeypatch.setattr(populate, "urlopen", MagicMock(side_effect=[
+        BytesIO(json.dumps({"artists": [{"id": artist_id}]}).encode()), BytesIO(b"[]"),
+    ]))
+    with caplog.at_level(logging.WARNING):
+        assert not populate.main_loop(source, tmp_path / "Music")
+    assert "No ListenBrainz popularity data" in caplog.text
+    assert source.read_text() == "Artist\n"
+
+
+def test_artist_only_selects_highest_listen_count(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artist_id = "44444444-4444-4444-8444-444444444444"
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist\n")
+    client = model_client(
+        "kind: artist\nartist: Artist",
+        f"artistId: {artist_id}",
+        f"releaseId: {RELEASE_ID}\nrecordingId: {RECORDING_ID}\ngenre: Rock",
+    )
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, client))
+    responses = [
+        {"artists": [{"id": artist_id, "name": "Artist"}]},
+        [
+            {"recording_mbid": OTHER_ID, "total_listen_count": 1},
+            {"recording_mbid": RECORDING_ID, "total_listen_count": 100},
+        ],
+        {"id": RECORDING_ID, "title": "First", "releases": [{"id": RELEASE_ID}]},
+        release,
+    ]
+    network = MagicMock(side_effect=[BytesIO(json.dumps(item).encode()) for item in responses])
+    monkeypatch.setattr(populate, "urlopen", network)
+    monkeypatch.setattr(populate.time, "sleep", MagicMock())
+    assert populate.main_loop(source, tmp_path / "Music")
+    assert [path.name for path in (tmp_path / "Music").rglob("*.yml")] == ["01 - First.yml"]
+    assert source.read_text() == ""
+    assert f"top-recordings-for-artist/{artist_id}" in network.call_args_list[1].args[0].full_url
+    assert f"recording/{RECORDING_ID}?" in network.call_args_list[2].args[0].full_url
+
+
+def test_existing_track_in_other_collection_directory_is_success(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist - First\n")
+    (tmp_path / "mediascan-config.yml").write_text("mediaDirs: [/data/Music, /data/MusicOther]\n")
+    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    install_lookup(monkeypatch, release, kind="track")
+    existing = tmp_path / "data/MusicOther/Artist/Different Album [1990]/03 - First.yml"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("trackData:\n  title: First\n  artist: Artist\n")
+    assert populate.main_loop(source)
+    assert source.read_text() == ""
+    assert not (tmp_path / "data/Music").exists()
+    assert existing.read_text() == "trackData:\n  title: First\n  artist: Artist\n"
+
+
+@pytest.mark.parametrize(("url", "scope", "page"), [
+    ("https://youtube.com/watch?v=vabnZ9-ex7o&list=PLabc", "track",
+     b'{"title": "Artist - First", "author_name": "Artist"}'),
+    ("https://youtube.com/playlist?list=PLabc", "album",
+     b'<script>"playlistMetadataRenderer":{"title":"Artist - Album"}</script>'),
+    ("https://shazam.com/song/123456/album", "track",
+     b'<link rel="canonical" href="https://www.shazam.com/song/123456/first">'
+     b'<meta property="og:title" content="First - Artist">'),
+])
+def test_url_end_to_end_enforces_scope(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    url: str, scope: str, page: bytes,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text(url + "\n")
+    client, network = install_lookup(monkeypatch, release, kind=scope)
+    responses = list(client.chat.completions.create.side_effect)
+    responses[0].choices[0].message.content = (
+        f"kind: {'track' if scope == 'album' else 'album'}\nartist: Artist\ntitle: First\n"
+    )
+    client.chat.completions.create.side_effect = responses
+    network.side_effect = [BytesIO(page), *list(network.side_effect)]
+    assert populate.main_loop(source, tmp_path / "Music")
+    assert len(list((tmp_path / "Music").rglob("*.yml"))) == (2 if scope == "album" else 1)
+    assert source.read_text() == ""
+    assert "YouTube" in client.chat.completions.create.call_args_list[0].kwargs["messages"][1]["content"] or (
+        "Shazam" in client.chat.completions.create.call_args_list[0].kwargs["messages"][1]["content"]
+    )
+
+
+def test_existing_media_tags_count_as_duplicate(tmp_path: Path) -> None:
+    album = tmp_path / "Artist" / "Album [2000]"
+    album.mkdir(parents=True)
+    media = album / "track.mp3"
+    tags = ID3()
+    tags.add(TIT2(encoding=3, text=["First"]))
+    tags.add(TPE1(encoding=3, text=["Artist"]))
+    tags.save(media)
+    proposed = [(tmp_path / "unused.yml", populate.dump_yaml({"trackData": {"artist": "Artist", "title": "First"}}))]
+    assert populate.find_existing_track(proposed, [tmp_path]) == media
+
+
+def test_existing_media_skips_request_and_removes_line(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist - First\n")
+    destination = tmp_path / "Music"
+    album = destination / "Artist" / "Other Album [2000]"
+    album.mkdir(parents=True)
+    tags = ID3()
+    tags.add(TIT2(encoding=3, text=["First"]))
+    tags.add(TPE1(encoding=3, text=["Artist"]))
+    tags.save(album / "track.mp3")
+    install_lookup(monkeypatch, release, kind="track")
+    assert populate.main_loop(source, destination)
+    assert source.read_text() == ""
+    assert not list(destination.rglob("*.yml"))
+
+
+@pytest.mark.parametrize("extension", [".yml", ".yaml"])
+def test_force_refreshes_existing_single_track(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch, extension: str,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist - First\n")
+    destination = tmp_path / "Music"
+    path, content = populate.build_tracks(release, RECORDING_ID, "Rock", destination)[0]
+    path = path.with_suffix(extension)
+    path.parent.mkdir(parents=True)
+    original = content.replace("Rock", "Jazz")
+    path.write_text(original)
+    tags = ID3()
+    tags.add(TIT2(encoding=3, text=["First"]))
+    tags.add(TPE1(encoding=3, text=["Artist"]))
+    tags.save(path.with_suffix(".mp3"))
+    install_lookup(monkeypatch, release, kind="track")
+    assert populate.main_loop(source, destination, force=True)
+    assert load_track_yaml_file(path).track_data.genre == "Rock"
+    assert path.with_name(path.name + ".bak").read_text() == original
+    assert not path.with_suffix(".yml" if extension == ".yaml" else ".yaml").exists()
+    assert source.read_text() == ""
+
+
+def test_unresolved_request_is_warned_and_remains_in_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("https://unsupported.example/song\n")
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, model_client()))
+    with caplog.at_level(logging.WARNING):
+        assert not populate.main_loop(source, tmp_path / "Music")
+    assert any(record.levelno == logging.WARNING and "Unsupported request URL" in record.message for record in caplog.records)
+    assert source.read_text() == "https://unsupported.example/song\n"
