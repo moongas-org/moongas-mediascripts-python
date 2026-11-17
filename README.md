@@ -810,8 +810,12 @@ matching artist and title (case- and whitespace-insensitive); a match is
 skipped and counts as success. This is a metadata match, not a recording-ID
 comparison, so distinct recordings with identical artist and title cannot be
 distinguished. Unreadable files are reported as warnings. Scanning large
-collections may take time. Album requests create the requested album's track
-files even when the same songs exist on another release.
+collections may take time; the command logs scan progress and reuses an
+incrementally built in-memory index for later requests in the same run.
+Symlinked directory cycles and repeated directory targets are skipped.
+The index is a per-run snapshot: do not modify the collection concurrently.
+Album requests create the requested album's track files even when the same songs
+exist on another release.
 Existing destination `.yml` or `.yaml` files are skipped by default. `--force`
 refreshes their six core fields while retaining streaming identifiers and
 `mediaFileData`, and saves the original as `.yml.bak` or `.yaml.bak`; it does

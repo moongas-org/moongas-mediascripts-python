@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
 from email.message import Message
 from email.utils import format_datetime
 from io import BytesIO
@@ -1103,6 +1104,78 @@ def test_existing_media_tags_count_as_duplicate(tmp_path: Path) -> None:
     tags.save(media)
     proposed = [(tmp_path / "unused.yml", populate.dump_yaml({"trackData": {"artist": "Artist", "title": "First"}}))]
     assert populate.find_existing_track(proposed, [tmp_path]) == media
+
+
+def test_duplicate_index_reuses_previous_scan_and_finds_generated_tracks(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("first request\nsecond request\n")
+    destination = tmp_path / "Music"
+    client, _ = install_lookup(monkeypatch, release, kind="track")
+    monkeypatch.setattr(populate, "resolve_request", MagicMock(return_value=(release, RECORDING_ID, "Rock")))
+    walker = MagicMock(wraps=populate.iter_duplicate_candidates)
+    monkeypatch.setattr(populate, "iter_duplicate_candidates", walker)
+    assert populate.main_loop(source, destination, sleep_between_files=0)
+    assert walker.call_count == 1
+    assert len(list(destination.rglob("*.yml"))) == 1
+    assert source.read_text() == ""
+    client.chat.completions.create.assert_not_called()
+
+
+def test_duplicate_scan_reports_progress_and_avoids_symlink_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    album = tmp_path / "Music" / "Artist" / "Album [2000]"
+    album.mkdir(parents=True)
+    (album / "loop").symlink_to(tmp_path / "Music", target_is_directory=True)
+    (album / "01 - Track.yml").write_text("trackData: {artist: Other, title: Track}\n")
+    proposed = [(album / "new.yml", populate.dump_yaml({"trackData": {"artist": "Artist", "title": "New"}}))]
+    clock = iter([0.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0])
+    monkeypatch.setattr(populate.time, "monotonic", lambda: next(clock, 12.0))
+    with caplog.at_level(logging.INFO):
+        assert populate.find_existing_track(proposed, [tmp_path / "Music"]) is None
+    assert "Checking collection for an existing track" in caplog.text
+    assert "scanned" in caplog.text.lower()
+    assert "Skipping already visited" in caplog.text
+    assert "No matching track found" in caplog.text
+
+
+def test_duplicate_index_resumes_after_match_and_caches_all_prior_entries(tmp_path: Path) -> None:
+    album = tmp_path / "Artist" / "Album [2000]"
+    album.mkdir(parents=True)
+    first = album / "01 - First.yml"
+    second = album / "02 - Second.yml"
+    first.write_text("trackData: {artist: Artist, title: First}\n")
+    second.write_text("trackData: {artist: Artist, title: Second}\n")
+
+    def proposed(title: str) -> list[tuple[Path, str]]:
+        return [(album / "new.yml", populate.dump_yaml({"trackData": {"artist": "Artist", "title": title}}))]
+
+    index = populate.ExistingTrackIndex([tmp_path])
+    assert index.find(proposed("First")) == first
+    assert index.scanned == 1
+    assert index.find(proposed("Second")) == second
+    assert index.scanned == 2
+    assert index.find(proposed("First")) == first
+    assert index.scanned == 2
+    assert index.find(proposed("Missing")) is None
+    assert index.find(proposed("First")) == first
+
+
+def test_failed_duplicate_scan_does_not_turn_into_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(_roots: list[Path]) -> Iterator[Path]:
+        yield from ()
+        raise OSError("directory read failed")
+
+    monkeypatch.setattr(populate, "iter_duplicate_candidates", fail)
+    index = populate.ExistingTrackIndex([tmp_path])
+    tracks = [(tmp_path / "track.yml", populate.dump_yaml({"trackData": {"artist": "A", "title": "B"}}))]
+    for _ in range(2):
+        with pytest.raises(OSError, match="directory read failed"):
+            index.find(tracks)
 
 
 def test_existing_media_skips_request_and_removes_line(

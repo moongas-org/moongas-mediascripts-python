@@ -39,7 +39,7 @@ from mediascripts.track.track_yaml.track_yaml_auto_populate import (
 )
 from mediascripts.track.track_yaml.track_yaml_common import (
     TextWriter,
-    iter_collection_files,
+    report_walk_error,
     save_yaml_atomically,
     show_yaml_file_diff,
 )
@@ -586,24 +586,82 @@ def track_key(artist: str, title: str) -> tuple[str, str]:
     return (" ".join(artist.split()).casefold(), " ".join(title.split()).casefold())
 
 
-def find_existing_track(tracks: list[tuple[Path, str]], roots: list[Path]) -> Path | None:
-    if len(tracks) != 1:
-        return None
-    target = load_document(tracks[0][1]).get("trackData")
-    if not is_mapping(target):
-        raise ValueError("Proposed track has no trackData")
-    key = track_key(text_field(target, "artist"), text_field(target, "title"))
+def iter_duplicate_candidates(roots: list[Path]) -> Iterator[Path]:
+    visited: set[tuple[int, int]] = set()
     for root in roots:
         if not root.exists():
             continue
         if not root.is_dir():
             raise ValueError(f"Collection media directory is not a directory: {root}")
-        for path in iter_collection_files(root):
-            if path.stem.lower() in {"artist", "album", "artists", "files"}:
+        logger.info("Scanning collection for existing tracks: %s", root)
+        for directory, subdirs, filenames in os.walk(root, followlinks=True, onerror=report_walk_error):
+            folder = Path(directory)
+            stat = folder.stat()
+            identity = (stat.st_dev, stat.st_ino)
+            if identity in visited:
+                logger.info("Skipping already visited collection directory: %s", folder)
+                subdirs.clear()
                 continue
+            visited.add(identity)
+            if not AlbumPathBuilder.of(folder).valid:
+                continue
+            for name in sorted(filenames):
+                path = folder / name
+                if path.stem.lower() not in {"artist", "album", "artists", "files"}:
+                    yield path
+
+
+class ExistingTrackIndex:
+    """Scan once, retaining matches and resuming after each early match."""
+
+    def __init__(self, roots: list[Path]) -> None:
+        self.files = iter_duplicate_candidates(roots)
+        self.matches: dict[tuple[str, str], Path] = {}
+        self.complete = False
+        self.failure: OSError | ValueError | None = None
+        self.scanned = 0
+
+    def remember(self, path: Path, content: str) -> None:
+        data = load_document(content).get("trackData")
+        if not is_mapping(data):
+            raise ValueError("Proposed track has no trackData")
+        key = track_key(text_field(data, "artist"), text_field(data, "title"))
+        self.matches.setdefault(key, path)
+
+    def find(self, tracks: list[tuple[Path, str]]) -> Path | None:
+        if len(tracks) != 1:
+            return None
+        target = load_document(tracks[0][1]).get("trackData")
+        if not is_mapping(target):
+            raise ValueError("Proposed track has no trackData")
+        key = track_key(text_field(target, "artist"), text_field(target, "title"))
+        logger.info("Checking collection for an existing track: %s - %s", *key)
+        if self.failure is not None:
+            raise self.failure
+        cached = self.matches.get(key)
+        if cached is not None:
+            if cached.is_file():
+                logger.info("Found existing track in this run's index: %s", cached)
+                return cached
+            del self.matches[key]
+        last_progress = time.monotonic()
+        try:
+            return self._scan(key, last_progress)
+        except (OSError, ValueError) as error:
+            self.failure = error
+            raise
+
+    def _scan(self, key: tuple[str, str], last_progress: float) -> Path | None:
+        for path in self.files:
+            self.scanned += 1
+            now = time.monotonic()
+            if now - last_progress >= 5:
+                logger.info("Existing-track check: scanned %d files so far; currently in %s", self.scanned, path.parent)
+                last_progress = now
             if path.is_symlink():
                 logger.warning("[%s] Skipping symlink while checking existing tracks", path)
                 continue
+            keys: list[tuple[str, str]] = []
             try:
                 if path.suffix.lower() in {".yml", ".yaml"}:
                     document = load_document(path.read_text(encoding="utf-8"))
@@ -611,16 +669,27 @@ def find_existing_track(tracks: list[tuple[Path, str]], roots: list[Path]) -> Pa
                     if not is_mapping(data):
                         continue
                     artist, title = data.get("artist"), data.get("title")
-                    if isinstance(artist, str) and isinstance(title, str) and track_key(artist, title) == key:
-                        return path
+                    if isinstance(artist, str) and isinstance(title, str):
+                        keys.append(track_key(artist, title))
                 elif path.suffix.lower() in MEDIA_EXTENSIONS:
                     media = load_media(path)
                     artists, titles = text_values(media, "artist"), text_values(media, "title")
-                    if any(track_key(artist, title) == key for artist in artists for title in titles):
-                        return path
+                    keys.extend(track_key(artist, title) for artist in artists for title in titles)
             except (*YAML_ERRORS, mutagen.MutagenError) as error:
                 logger.warning("[%s] Could not inspect existing track: %s", path, error)
-    return None
+            for found in keys:
+                self.matches.setdefault(found, path)
+            if key in self.matches:
+                logger.info("Found existing track after scanning %d files: %s", self.scanned, self.matches[key])
+                return self.matches[key]
+        if not self.complete:
+            self.complete = True
+        logger.info("No matching track found after scanning %d files", self.scanned)
+        return None
+
+
+def find_existing_track(tracks: list[tuple[Path, str]], roots: list[Path]) -> Path | None:
+    return ExistingTrackIndex(roots).find(tracks)
 
 
 def save_tracks(
@@ -776,6 +845,7 @@ def main_loop(
         logger.info("Input file backed up to %s before processing", input_backup)
     client: OpenAI | None = None
     catalogue = MusicBrainz()
+    existing_index: ExistingTrackIndex | None = None
     succeeded = True
     processed = 0
     completed = failed = listed = 0
@@ -805,14 +875,23 @@ def main_loop(
             force_existing = force and (
                 target.exists() or target.is_symlink() or alternate.exists() or alternate.is_symlink()
             )
-            existing = (
-                find_existing_track(tracks, collection_roots(specific_dir))
-                if recording_id and not force_existing else None
-            )
+            existing: Path | None = None
+            if recording_id and not force_existing:
+                if existing_index is None:
+                    existing_index = ExistingTrackIndex(collection_roots(specific_dir))
+                existing = existing_index.find(tracks)
             if existing is not None:
                 logger.info("Skipping track already present in collection: %s", existing)
             else:
                 save_tracks(tracks, specific_dir, force, dry_run)
+                if existing_index is not None and not dry_run:
+                    for path, _ in tracks:
+                        actual = path if path.exists() else path.with_suffix(".yaml")
+                        if actual.is_file():
+                            try:
+                                existing_index.remember(actual, actual.read_text(encoding="utf-8"))
+                            except YAML_ERRORS as error:
+                                logger.warning("[%s] Could not index saved track: %s", actual, error)
         except APIStatusError as error:
             logger.warning(
                 "[%s:%d] Provider HTTP %d: %s. Check LLM_BASE_URL, LLM_API_KEY and LLM_MODEL.",
