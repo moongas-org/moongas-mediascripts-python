@@ -8,8 +8,6 @@ import re
 import time
 import unicodedata
 from collections.abc import Iterator, Mapping
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from functools import partial
 from html.parser import HTMLParser
 from io import StringIO
@@ -34,6 +32,7 @@ from yaml import YAMLError
 
 from mediascripts.acoustid.musicbrainz import MIN_SLEEP, USER_AGENT, is_recording_id
 from mediascripts.common.cli.parse_boolean import parse_boolean
+from mediascripts.common.http import retry_after_seconds
 from mediascripts.common.openai.client import MODEL_NAME, get_client
 from mediascripts.lyrics.lyrics_common import MEDIA_EXTENSIONS
 from mediascripts.mediafile.auto_tag_media_file import load_media, read_track_values, text_values
@@ -317,16 +316,11 @@ class MusicBrainz:
 
 
 def retry_after_delay(value: str, fallback: float) -> float:
-    if re.fullmatch(r"\d+", value.strip()):
-        return min(MAX_RETRY_DELAY, float(value))
-    try:
-        date = parsedate_to_datetime(value)
-        if date.tzinfo is None:
-            date = date.replace(tzinfo=timezone.utc)
-        return min(MAX_RETRY_DELAY, max(0.0, (date - datetime.now(timezone.utc)).total_seconds()))
-    except (ValueError, TypeError, OverflowError):
-        logger.warning("Invalid MusicBrainz Retry-After header %r; using %.2fs backoff", value, fallback)
-        return fallback
+    seconds = retry_after_seconds(value)
+    if seconds is not None:
+        return min(MAX_RETRY_DELAY, seconds)
+    logger.warning("Invalid MusicBrainz Retry-After header %r; using %.2fs backoff", value, fallback)
+    return fallback
 
 
 def lucene_phrase(value: str) -> str:

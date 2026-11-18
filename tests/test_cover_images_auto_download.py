@@ -1,11 +1,15 @@
+import json
 import logging
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
+from email.message import Message
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from urllib.parse import parse_qs, urlencode, urlsplit
 from unittest.mock import MagicMock
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.request import Request
 
 import pytest
 from openai import OpenAI
@@ -26,6 +30,7 @@ def make_image(fmt: str = "JPEG", size: tuple[int, int] = (100, 100)) -> bytes:
 SMALL_JPEG = make_image("JPEG", (100, 100))
 LARGE_JPEG = make_image("JPEG", (1200, 1200))
 LARGE_WEBP = make_image("WEBP", (1500, 1500))
+TEST_USER_AGENT = "Test Chromium User-Agent"
 
 
 @pytest.fixture
@@ -47,7 +52,8 @@ def model_client(*contents: str) -> MagicMock:
 
 
 def mock_downloads(monkeypatch: pytest.MonkeyPatch, images: dict[str, bytes]) -> MagicMock:
-    def fake_download(url: str) -> bytes:
+    def fake_download(url: str, user_agent: str) -> bytes:
+        assert user_agent == TEST_USER_AGENT
         if url not in images:
             raise ValueError(f"Unexpected URL: {url}")
         return images[url]
@@ -61,8 +67,8 @@ def mock_browser(monkeypatch: pytest.MonkeyPatch, *urls: str) -> MagicMock:
     search = MagicMock(return_value=list(urls))
 
     @contextmanager
-    def open_browser() -> Generator[download.CoverSearch, None, None]:
-        yield search
+    def open_browser() -> Generator[tuple[download.CoverSearch, str], None, None]:
+        yield search, TEST_USER_AGENT
 
     monkeypatch.setattr(download, "google_images_search", open_browser)
     return search
@@ -94,6 +100,43 @@ def test_find_cover_requires_basename_and_supported_extension(album: Path) -> No
     assert download.find_cover(album) == album / "cover.webp"
     (album / "cover.jpg").touch()
     assert download.find_cover(album) == album / "cover.jpg"
+
+
+def test_download_image_sends_browser_user_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import Route
+
+    url = "https://example.com/cover.jpg"
+    search_user_agents: list[str] = []
+    download_user_agents: list[str | None] = []
+
+    def fake_search(page: "Page", artist: str, album: str, year: int) -> list[str]:
+        search_url = download.google_images_url(artist, album, year)
+
+        def capture(route: Route) -> None:
+            search_user_agents.append(route.request.headers["user-agent"])
+            route.fulfill(content_type="text/html", body="<html></html>")
+
+        page.route(search_url, capture)
+        page.goto(search_url)
+        return [url]
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        download_user_agents.append(request.get_header("User-agent"))
+        assert timeout == 30
+        return BytesIO(SMALL_JPEG)
+
+    monkeypatch.setattr(download, "search_google_images", fake_search)
+    monkeypatch.setattr(download, "urlopen", fake_urlopen)
+    try:
+        with download.google_images_search() as (search, user_agent):
+            candidate, = search("A", "B", 2000)
+            assert download.download_image(candidate, user_agent) == SMALL_JPEG
+    except download.GoogleImagesError as error:
+        if "Executable doesn't exist" not in str(error):
+            raise
+        pytest.skip("Run python -m playwright install chromium for browser tests")
+    assert search_user_agents and download_user_agents == search_user_agents
 
 
 def test_album_metadata_derives_and_unescapes_names(album: Path) -> None:
@@ -171,7 +214,7 @@ def test_process_album_downloads_and_saves_jpeg(
 ) -> None:
     mock_downloads(monkeypatch, {"https://example.com/big.jpg": LARGE_JPEG})
 
-    assert download.process_album(album, lambda *_: ["https://example.com/big.jpg"])
+    assert download.process_album(album, lambda *_: ["https://example.com/big.jpg"], user_agent=TEST_USER_AGENT)
 
     cover = album / "cover.jpg"
     assert cover.read_bytes() == LARGE_JPEG
@@ -183,7 +226,7 @@ def test_process_album_converts_non_jpeg(
 ) -> None:
     mock_downloads(monkeypatch, {"https://example.com/big.webp": LARGE_WEBP})
 
-    assert download.process_album(album, lambda *_: ["https://example.com/big.webp"])
+    assert download.process_album(album, lambda *_: ["https://example.com/big.webp"], user_agent=TEST_USER_AGENT)
 
     with Image.open(album / "cover.jpg") as image:
         assert image.format == "JPEG"
@@ -193,7 +236,7 @@ def test_process_album_converts_non_jpeg(
 def test_process_album_skips_existing_cover_without_force(album: Path) -> None:
     (album / "cover.jpg").write_bytes(SMALL_JPEG)
     search = MagicMock()
-    assert download.process_album(album, search)
+    assert download.process_album(album, search, user_agent=TEST_USER_AGENT)
     search.assert_not_called()
 
 
@@ -203,7 +246,9 @@ def test_process_album_force_replaces_cover_with_backup(
     (album / "cover.jpg").write_bytes(SMALL_JPEG)
     mock_downloads(monkeypatch, {"https://example.com/big.jpg": LARGE_JPEG})
 
-    assert download.process_album(album, lambda *_: ["https://example.com/big.jpg"], force=True)
+    assert download.process_album(
+        album, lambda *_: ["https://example.com/big.jpg"], force=True, user_agent=TEST_USER_AGENT,
+    )
     assert (album / "cover.jpg").read_bytes() == LARGE_JPEG
     assert (album / "cover.jpg.bak").read_bytes() == SMALL_JPEG
 
@@ -214,13 +259,14 @@ def test_process_album_continues_past_failed_downloads(
     urls = ["https://example.com/bad.jpg", "https://example.com/good.jpg"]
     images = {"https://example.com/good.jpg": LARGE_JPEG}
 
-    def fake_download(url: str) -> bytes:
+    def fake_download(url: str, user_agent: str) -> bytes:
+        assert user_agent == TEST_USER_AGENT
         if url not in images:
             raise ValueError("gone")
         return images[url]
 
     monkeypatch.setattr(download, "download_image", fake_download)
-    assert download.process_album(album, lambda *_: urls)
+    assert download.process_album(album, lambda *_: urls, user_agent=TEST_USER_AGENT)
     assert (album / "cover.jpg").read_bytes() == LARGE_JPEG
 
 
@@ -235,7 +281,9 @@ def test_process_album_dry_run_saves_nothing(
         "  dateReleased:\n    y: 1999\n"
     )
 
-    assert download.process_album(album, lambda *_: ["https://example.com/big.jpg"], dry_run=True)
+    assert download.process_album(
+        album, lambda *_: ["https://example.com/big.jpg"], dry_run=True, user_agent=TEST_USER_AGENT,
+    )
     client.chat.completions.create.assert_called_once()
     assert not (album / "cover.jpg").exists()
     assert "explicitCover: false" in (album / "album.yml").read_text()
@@ -330,3 +378,114 @@ def test_main_loop_stops_batch_when_google_is_blocked(
     assert not download.main_loop(0, quiet=True)
     search.assert_called_once()
     assert "Cover search stopped after 0 of 2 album(s): blocked" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("original", "thumbnail", "expected_size"),
+    [
+        (None, LARGE_JPEG, (1200, 1200)),
+        (SMALL_JPEG, LARGE_JPEG, (1200, 1200)),
+        (make_image("PNG", (1600, 1600)), LARGE_JPEG, (1600, 1600)),
+        (SMALL_JPEG, None, (100, 100)),
+    ],
+)
+def test_musicbrainz_saves_largest_matching_front_art_without_google_or_llm(
+    album: Path, monkeypatch: pytest.MonkeyPatch,
+    original: bytes | None, thumbnail: bytes | None, expected_size: tuple[int, int],
+) -> None:
+    wrong_year = "00000000-0000-0000-0000-000000000001"
+    wrong_artist = "00000000-0000-0000-0000-000000000002"
+    matched = "00000000-0000-0000-0000-000000000003"
+    payload = {"release-groups": [
+        {"id": wrong_year, "title": "Album. Name", "artist-credit": [{"name": "Artist.Name"}], "first-release-date": "2003"},
+        {"id": wrong_artist, "title": "Album. Name", "artist-credit": [{"name": "Different Artist"}], "first-release-date": "1999"},
+        {"id": matched, "title": "Album Name", "artist-credit": [{"name": "Artist Name"}], "first-release-date": "1999-10-12"},
+    ]}
+    front = f"https://coverartarchive.org/release-group/{matched}/front"
+    requested: list[str] = []
+    album_yaml = album / "album.yml"
+    album_yaml.write_text("albumData: {explicitCover: false}\n")
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        assert timeout == 30
+        assert request.get_header("User-agent") == download.MUSICBRAINZ_USER_AGENT
+        url = request.full_url
+        requested.append(url)
+        if url.startswith(download.MUSICBRAINZ_URL + "?"):
+            assert parse_qs(urlsplit(url).query)["query"] == ['artist:"Artist.Name" AND releasegroup:"Album. Name"']
+            return BytesIO(json.dumps(payload).encode())
+        assert url in {front, f"{front}-1200"}
+        image = original if url == front else thumbnail
+        if image is None:
+            raise HTTPError(url, 404, "Not Found", Message(), None)
+        return BytesIO(image)
+
+    browser = MagicMock(side_effect=AssertionError("Must not start Chromium"))
+    llm = MagicMock(side_effect=AssertionError("Must not call the LLM"))
+    monkeypatch.setattr(download, "urlopen", fake_urlopen)
+    monkeypatch.setattr(download, "google_images_search", browser)
+    monkeypatch.setattr(download, "get_client", llm)
+
+    assert download.main_loop(0, specific_dir=album, source="musicbrainz", explicit_check=False)
+    with Image.open(album / "cover.jpg") as image:
+        assert image.size == expected_size
+        assert image.format == "JPEG"
+    assert requested[1:] == [f"{front}-1200", front]
+    assert album_yaml.read_text() == "albumData: {explicitCover: false}\n"
+    browser.assert_not_called()
+    llm.assert_not_called()
+
+
+@pytest.mark.parametrize(("status", "retry_after", "wait"), [(503, None, 2.0), (503, "12", 12.0), (429, "bad", 2.0)])
+def test_musicbrainz_paces_requests_and_retries(
+    monkeypatch: pytest.MonkeyPatch, status: int, retry_after: str | None, wait: float,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = 0.0
+    requests: list[float] = []
+    caplog.set_level(logging.INFO, logger=download.__name__)
+
+    def sleep(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        requests.append(clock)
+        assert caplog.messages[-1] == (
+            f"MusicBrainz request: GET {request.full_url} "
+            f"headers={json.dumps(dict(request.header_items()))} (attempt {2 if len(requests) == 2 else 1}/5)"
+        )
+        if len(requests) == 1:
+            headers = Message()
+            if retry_after is not None:
+                headers["Retry-After"] = retry_after
+            raise HTTPError(request.full_url, status, "Unavailable", headers, None)
+        return BytesIO(b'{"release-groups":[]}')
+
+    monkeypatch.setattr(download, "time", MagicMock(monotonic=lambda: clock, sleep=sleep))
+    monkeypatch.setattr(download, "urlopen", fake_urlopen)
+    search = download.musicbrainz_search()
+
+    assert search("A & B", 'Album "Title"', 2000) == []
+    assert search("C", "D", 2001) == []
+    assert requests == [0.0, wait, wait + 1.1]
+
+
+def test_musicbrainz_stops_after_retry_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = MagicMock(side_effect=HTTPError("https://musicbrainz.org", 503, "Unavailable", Message(), None))
+    clock = 0.0
+    waits: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        nonlocal clock
+        waits.append(seconds)
+        clock += seconds
+
+    monkeypatch.setattr(download, "time", MagicMock(monotonic=lambda: clock, sleep=sleep))
+    monkeypatch.setattr(download, "urlopen", request)
+
+    with pytest.raises(download.MusicBrainzError, match=r"HTTP 503 after 5 attempts"):
+        download.musicbrainz_search()("A", "B", 2000)
+
+    assert request.call_count == 5
+    assert waits == [2.0, 4.0, 8.0, 16.0]

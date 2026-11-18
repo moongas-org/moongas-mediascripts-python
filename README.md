@@ -678,12 +678,23 @@ while processing continues.
 `cover-images-auto-download` scans valid album directories under
 `$MOONGAS_COLLECTION_ROOTDIR/data` for albums missing a cover image. An album
 is covered when its directory contains a file with basename `cover` and a
-`.jpg` or `.webp` extension. For each album missing one, headless Chromium
-searches Google Images with the **Large** size filter and a query like
+`.jpg` or `.webp` extension. Use `--source musicbrainz` to look up release
+groups by artist and title, preferring the requested year, and download
+front artwork from Cover Art Archive. It requests the 1200 px thumbnail
+(the largest thumbnail size) and the original, then saves whichever usable
+image has more pixels. This source requires no browser or
+search API key. MusicBrainz lookup requests are spaced at least 1.1 seconds apart.
+At INFO level, each attempt logs the HTTP method, full encoded URL, and request headers.
+Rate limits and temporary server errors are retried up to four times with
+exponential backoff and respect `Retry-After`. The batch stops if all attempts
+fail or the server requests a wait longer than two minutes.
+
+The default `--source google` uses headless Chromium to search Google Images
+with the **Large** size filter and a query like
 `<artist> <album> (<year> album) album cover art image`. The script takes up
 to five original image URLs from the results, not from an LLM.
-Candidates are downloaded and scored: JPEG is preferred, then images of at
-least 1000x1000 pixels, then larger images. The result is saved as
+Candidate downloads use the same User-Agent as Chromium. JPEG is preferred,
+then images of at least 1000x1000 pixels, then larger images. The result is saved as
 `cover.jpg`; non-JPEG images are converted with Pillow. If the album has an
 `album.yml`, the LLM checks whether the album's artwork is known to be explicit.
 If so, `explicitCover` is set to `true`, with the original backed up to
@@ -693,6 +704,8 @@ If so, `explicitCover` is set to `true`, with the original backed up to
 uv sync --extra cover-search --extra llm
 uv run --extra cover-search --extra llm python -m playwright install chromium
 
+uv run --extra llm cover-images-auto-download --source musicbrainz --no-explicit-check --dry-run --count 1
+uv run --extra llm cover-images-auto-download --source musicbrainz --no-explicit-check
 cover-images-auto-download --dry-run          # search and download without saving
 cover-images-auto-download --dir "/music/Artist/Album [1999]"
 cover-images-auto-download --llm=false        # only report albums missing covers
@@ -704,7 +717,9 @@ processed; `-q`/`--quiet` suppresses the progress bar. Downloads failing for
 individual URLs are logged and the next candidate is tried; albums with no
 usable image are reported as failures. If Google blocks automated requests,
 requires consent, or no longer shows a recognizable results grid, the batch
-stops rather than repeatedly querying Google.
+stops rather than repeatedly querying Google; rerun with `--source musicbrainz`
+to skip Google and process the remaining albums. `--no-explicit-check` skips
+LLM requests and leaves `album.yml` unchanged.
 
 ## Scan Media Files into Track YAML
 

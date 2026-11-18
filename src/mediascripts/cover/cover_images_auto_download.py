@@ -1,8 +1,8 @@
 """Find and download cover images for albums that are missing one.
 
 An album is missing a cover when its directory has no file with basename
-"cover" and a supported extension (.jpg or .webp). Google Images supplies
-candidate URLs with the Large size filter. The LLM only checks whether
+"cover" and a supported extension (.jpg or .webp). Choose Google Images
+with the Large filter or MusicBrainz with Cover Art Archive. The LLM only checks whether
 the album's front cover is known to be explicit.
 JPEG output is preferred; candidates of at least 1000x1000 pixels are
 preferred. Non-JPEG downloads are converted to cover.jpg. If the cover is
@@ -13,19 +13,22 @@ Usage: cover-images-auto-download [options]
 """
 
 import argparse
+import json
 import logging
 import os
 import re
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
+from uuid import UUID
 
 from mediascan.types.album.album_path import AlbumPathBuilder
 from openai import APIError, APIStatusError, OpenAI
@@ -36,6 +39,7 @@ from ruamel.yaml.error import YAMLError
 from tqdm import tqdm
 
 from mediascripts.common.cli.parse_boolean import parse_boolean
+from mediascripts.common.http import retry_after_seconds
 from mediascripts.common.openai.client import MODEL_NAME, get_client
 from mediascripts.mediafile.auto_tag_media_file import unescape_name
 from mediascripts.track.track_yaml.track_yaml_common import TextWriter, save_yaml_atomically
@@ -50,10 +54,16 @@ MAX_CANDIDATES = 5
 MAX_SEARCH_RESULTS = 10
 MAX_IMAGE_BYTES = 20_000_000
 PREFERRED_MIN_RESOLUTION = 1000
-USER_AGENT = "moongas-cover-download/1.0 (+https://github.com/moongas-org)"
 YAML_ERRORS = (OSError, UnicodeError, YAMLError, ValueError, TypeError)
 GOOGLE_IMAGE_RESULTS = "[data-ri]:has(img)"
 GOOGLE_PREVIEW_IMAGES = "img.iPVvYb, img.sFlh5c.FyHeAf"
+MUSICBRAINZ_URL = "https://musicbrainz.org/ws/2/release-group"
+COVER_ART_ARCHIVE_URL = "https://coverartarchive.org/release-group"
+MUSICBRAINZ_USER_AGENT = "moongas-cover-download/1.0 (https://github.com/moongas-org/moongas-mediascripts-python)"
+MUSICBRAINZ_MIN_INTERVAL = 1.1
+MUSICBRAINZ_MAX_ATTEMPTS = 5
+MUSICBRAINZ_MAX_RETRY_DELAY = 120.0
+MUSICBRAINZ_RETRY_STATUSES = {429, 502, 503, 504}
 
 SYSTEM_PROMPT = """Reply with only true or false. Reply true only if the requested album's
 front cover artwork is known to show nudity, sexual imagery, graphic violence, or
@@ -65,6 +75,10 @@ CoverSearch = Callable[[str, str, int], list[str]]
 
 class GoogleImagesError(RuntimeError):
     """Google Images is unavailable; stop the batch rather than retrying every album."""
+
+
+class MusicBrainzError(RuntimeError):
+    """MusicBrainz is throttling requests or unavailable."""
 
 
 class _YamlRoundTrip(Protocol):
@@ -173,7 +187,7 @@ def search_google_images(page: "Page", artist: str, album: str, year: int) -> li
 
 
 @contextmanager
-def google_images_search() -> Generator[CoverSearch, None, None]:
+def google_images_search() -> Generator[tuple[CoverSearch, str], None, None]:
     try:
         from playwright.sync_api import Error as PlaywrightError, sync_playwright
     except ImportError as error:
@@ -183,11 +197,111 @@ def google_images_search() -> Generator[CoverSearch, None, None]:
             browser = playwright.chromium.launch()
             try:
                 page = browser.new_page()
-                yield lambda artist, album, year: search_google_images(page, artist, album, year)
+                user_agent: object = page.evaluate("navigator.userAgent")
+                if not isinstance(user_agent, str) or not user_agent:
+                    raise GoogleImagesError("Chromium did not provide a User-Agent")
+
+                def search(artist: str, album: str, year: int) -> list[str]:
+                    return search_google_images(page, artist, album, year)
+
+                yield search, user_agent
             finally:
                 browser.close()
     except PlaywrightError as error:
         raise GoogleImagesError(f"Chromium search failed: {error}") from error
+
+
+def musicbrainz_name(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", value.casefold())
+    return "".join(char for char in decomposed if char.isalnum())
+
+
+def musicbrainz_release_group(payload: object, artist: str, album: str, year: int) -> UUID | None:
+    if not isinstance(payload, dict):
+        raise ValueError("MusicBrainz returned an invalid release-group response")
+    groups = cast(dict[str, object], payload).get("release-groups")
+    if not isinstance(groups, list):
+        raise ValueError("MusicBrainz response is missing its release-group list")
+    artist_key, album_key = musicbrainz_name(artist), musicbrainz_name(album)
+    matches: list[tuple[bool, UUID]] = []
+    for group in cast(list[object], groups):
+        if not isinstance(group, dict):
+            continue
+        fields = cast(dict[str, object], group)
+        title, credits, mbid = fields.get("title"), fields.get("artist-credit"), fields.get("id")
+        if not isinstance(title, str) or musicbrainz_name(title) != album_key:
+            continue
+        if not isinstance(credits, list) or not isinstance(mbid, str):
+            continue
+        credited_artist = ""
+        for credit in cast(list[object], credits):
+            if not isinstance(credit, dict):
+                break
+            credit_fields = cast(dict[str, object], credit)
+            name, join = credit_fields.get("name"), credit_fields.get("joinphrase", "")
+            if not isinstance(name, str) or not isinstance(join, str):
+                break
+            credited_artist += name + join
+        else:
+            if musicbrainz_name(credited_artist) != artist_key:
+                continue
+            date = fields.get("first-release-date")
+            matches.append((isinstance(date, str) and date.split("-", 1)[0] == str(year), UUID(mbid)))
+    # Prefer the requested year, keeping MusicBrainz's order for reissues.
+    return max(matches, key=lambda match: match[0])[1] if matches else None
+
+
+def musicbrainz_search() -> CoverSearch:
+    next_request = 0.0
+
+    def search(artist: str, album: str, year: int) -> list[str]:
+        nonlocal next_request
+        # Double quotes and backslashes must be escaped inside Lucene phrases.
+        query = f"artist:{json.dumps(artist, ensure_ascii=False)} AND releasegroup:{json.dumps(album, ensure_ascii=False)}"
+        url = MUSICBRAINZ_URL + "?" + urlencode({"query": query, "fmt": "json", "limit": 25})
+        request = Request(url, headers={"User-Agent": MUSICBRAINZ_USER_AGENT, "Accept": "application/json"})
+        for attempt in range(1, MUSICBRAINZ_MAX_ATTEMPTS + 1):
+            delay = next_request - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            logger.info(
+                "MusicBrainz request: %s %s headers=%s (attempt %d/%d)",
+                request.get_method(), request.full_url, json.dumps(dict(request.header_items())),
+                attempt, MUSICBRAINZ_MAX_ATTEMPTS,
+            )
+            next_request = time.monotonic() + MUSICBRAINZ_MIN_INTERVAL
+            try:
+                with urlopen(request, timeout=30) as response:
+                    payload: object = json.load(response)
+                break
+            except HTTPError as error:
+                retry_after = error.headers.get("Retry-After")
+                error.close()
+                if error.code not in MUSICBRAINZ_RETRY_STATUSES:
+                    raise
+                if attempt == MUSICBRAINZ_MAX_ATTEMPTS:
+                    raise MusicBrainzError(f"MusicBrainz returned HTTP {error.code} after {attempt} attempts") from error
+                server_delay = retry_after_seconds(retry_after) if retry_after is not None else None
+                if server_delay is not None and server_delay > MUSICBRAINZ_MAX_RETRY_DELAY:
+                    raise MusicBrainzError(
+                        f"MusicBrainz returned HTTP {error.code} and asked to retry in {server_delay:.0f}s, "
+                        f"above the {MUSICBRAINZ_MAX_RETRY_DELAY:.0f}s limit; try again later"
+                    ) from error
+                retry_delay = max(2.0 ** attempt, server_delay if server_delay is not None else 0.0)
+                logger.warning(
+                    "MusicBrainz returned HTTP %d (attempt %d/%d); retrying in %.1fs",
+                    error.code, attempt, MUSICBRAINZ_MAX_ATTEMPTS, retry_delay,
+                )
+                next_request = time.monotonic() + retry_delay
+        else:
+            raise AssertionError("MusicBrainz request loop exhausted")
+        mbid = musicbrainz_release_group(payload, artist, album, year)
+        if mbid is None:
+            return []
+        front = f"{COVER_ART_ARCHIVE_URL}/{mbid}/front"
+        return [f"{front}-1200", front]
+
+    return search
 
 
 def is_explicit_cover(client: OpenAI, artist: str, album: str, year: int) -> bool:
@@ -206,11 +320,11 @@ def is_explicit_cover(client: OpenAI, artist: str, album: str, year: int) -> boo
     raise ValueError("Model did not return true or false for the explicit-cover check")
 
 
-def download_image(url: str) -> bytes:
-    """Download one image URL with a size cap."""
+def download_image(url: str, user_agent: str) -> bytes:
+    """Download one image URL with Chromium's User-Agent and a size cap."""
     if not re.match(r"^https?://", url):
         raise ValueError(f"Unsupported image URL: {url}")
-    request = Request(url, headers={"User-Agent": USER_AGENT})
+    request = Request(url, headers={"User-Agent": user_agent})
     with urlopen(request, timeout=30) as response:
         data = response.read(MAX_IMAGE_BYTES + 1)
     if len(data) > MAX_IMAGE_BYTES:
@@ -218,9 +332,9 @@ def download_image(url: str) -> bytes:
     return data
 
 
-def choose_image(candidates: list[bytes]) -> tuple[bytes, bool]:
-    """Pick the best candidate; returns (image bytes, is_jpeg). Prefers JPEG and >=1000px."""
-    scored: list[tuple[tuple[bool, bool, int], bytes, bool]] = []
+def choose_image(candidates: list[bytes], *, prefer_resolution: bool = False) -> tuple[bytes, bool]:
+    """Return (image bytes, is_jpeg) for the highest-ranked candidate."""
+    scored: list[tuple[tuple[int, bool, bool, int], bytes, bool]] = []
     for data in candidates:
         try:
             with Image.open(BytesIO(data)) as image:
@@ -229,7 +343,8 @@ def choose_image(candidates: list[bytes]) -> tuple[bytes, bool]:
         except (UnidentifiedImageError, OSError) as error:
             logger.warning("Ignoring unreadable image candidate: %s", error)
             continue
-        score = (is_jpeg, min(width, height) >= PREFERRED_MIN_RESOLUTION, width * height)
+        pixels = width * height
+        score = (pixels if prefer_resolution else 0, is_jpeg, min(width, height) >= PREFERRED_MIN_RESOLUTION, pixels)
         scored.append((score, data, is_jpeg))
     if not scored:
         raise ValueError("No readable cover image candidates")
@@ -297,7 +412,8 @@ def set_explicit_cover(album_dir: Path, dry_run: bool) -> bool:
 
 
 def process_album(
-    album_dir: Path, search: CoverSearch, dry_run: bool = False, force: bool = False,
+    album_dir: Path, search: CoverSearch, dry_run: bool = False, force: bool = False, *,
+    user_agent: str, explicit_check: bool = True, prefer_resolution: bool = False,
 ) -> bool:
     """Download a cover for one album directory. Returns True when nothing more is needed."""
     try:
@@ -308,20 +424,20 @@ def process_album(
         artist, album, year = album_metadata(album_dir)
         urls = search(artist, album, year)
         if not urls:
-            logger.warning("[%s] No original Google Images URLs found for %r - %r", album_dir, artist, album)
+            logger.warning("[%s] No matching cover image URLs found for %r - %r", album_dir, artist, album)
             return False
         candidates: list[bytes] = []
         for url in urls:
             try:
-                candidates.append(download_image(url))
+                candidates.append(download_image(url, user_agent))
             except (OSError, ValueError, URLError, HTTPError) as error:
                 logger.warning("[%s] Could not download %s: %s", album_dir, url, error)
         if not candidates:
             logger.warning("[%s] No downloadable cover candidates for %r - %r", album_dir, artist, album)
             return False
-        data, is_jpeg = choose_image(candidates)
+        data, is_jpeg = choose_image(candidates, prefer_resolution=prefer_resolution)
         save_cover(album_dir, data, is_jpeg, dry_run)
-        if (album_dir / "album.yml").is_file() and is_explicit_cover(get_client(), artist, album, year):
+        if explicit_check and (album_dir / "album.yml").is_file() and is_explicit_cover(get_client(), artist, album, year):
             set_explicit_cover(album_dir, dry_run)
         return True
     except APIStatusError as error:
@@ -342,6 +458,9 @@ def main_loop(
     dry_run: bool = False,
     count: int | None = None,
     quiet: bool = False,
+    *,
+    source: str = "google",
+    explicit_check: bool = True,
 ) -> bool:
     if count is not None and count < 0:
         raise ValueError("count must be non-negative")
@@ -371,16 +490,25 @@ def main_loop(
     succeeded = 0
     failed = 0
     if pending:
+        if source == "musicbrainz":
+            lookup = nullcontext((musicbrainz_search(), MUSICBRAINZ_USER_AGENT))
+        elif source == "google":
+            lookup = google_images_search()
+        else:
+            raise ValueError(f"Unknown cover source: {source}")
         try:
-            with google_images_search() as search:
+            with lookup as (search, user_agent):
                 for index, album in enumerate(tqdm(pending, desc="Downloading covers", unit="album", disable=quiet)):
-                    if process_album(album, search, dry_run=dry_run, force=force):
+                    if process_album(
+                        album, search, dry_run=dry_run, force=force, user_agent=user_agent, explicit_check=explicit_check,
+                        prefer_resolution=source == "musicbrainz",
+                    ):
                         succeeded += 1
                     else:
                         failed += 1
                     if sleep and index + 1 < len(pending):
                         time.sleep(sleep)
-        except GoogleImagesError as error:
+        except (GoogleImagesError, MusicBrainzError) as error:
             logger.error("Cover search stopped after %d of %d album(s): %s", succeeded + failed, len(pending), error)
             return False
     logger.info("Cover download complete: %d succeeded, %d failed", succeeded, failed)
@@ -398,8 +526,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--llm", type=parse_boolean, default=True, metavar="true|false",
-        help="Enable Google Images lookup and LLM explicit-cover checks (default: true). "
+        help="Enable cover lookup (default: true). "
         "Use --llm=false to only report missing covers.",
+    )
+    parser.add_argument(
+        "--source", choices=("google", "musicbrainz"), default="google",
+        help="Cover search backend (default: google). MusicBrainz uses Cover Art Archive without Chromium.",
+    )
+    parser.add_argument(
+        "--no-explicit-check", action="store_true",
+        help="Download covers without calling the LLM or updating explicitCover.",
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -427,6 +563,7 @@ def main() -> int:
     try:
         return 0 if main_loop(
             args.sleep, args.llm, args.dir, args.force, args.dry_run, args.count, args.quiet,
+            source=args.source, explicit_check=not args.no_explicit_check,
         ) else 1
     except YAML_ERRORS as error:
         logger.error("%s", error)
