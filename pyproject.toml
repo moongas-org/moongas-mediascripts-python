@@ -70,6 +70,7 @@ track-yaml-auto-populate-from-file = "mediascripts.track.track_yaml.track_yaml_a
 track-yaml-reformat = "mediascripts.track.track_yaml.track_yaml_reformat:main"
 scan-media-files-to-track-yaml = "mediascripts.track.track_yaml.scan_media_files_to_track_yaml:main"
 convert-covers = "mediascripts.convert.convert_covers:main"
+cover-images-auto-download = "mediascripts.cover.cover_images_auto_download:main"
 convert-videos = "mediascripts.convert.convert_videos:main"
 compare-track-yaml-with-media-file = "mediascripts.track.track_yaml.compare_track_yaml_with_media_file:main"
 merge-track-yaml-with-media-file = "mediascripts.track.track_yaml.merge_track_yaml_with_media_file:main"

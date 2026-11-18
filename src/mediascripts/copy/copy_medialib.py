@@ -176,7 +176,7 @@ def copy_medialib(
     log.info(
         "Copy settings: source=%s; destination=%s; include_filenames=%r; "
         "exclude_keywords=%r; mode=%s; dry_run=%s; overwrite_existing=%s; "
-        "overwrite_newer=%s; make_track_yml=%s; diff=%s; delete=%s",
+        "overwrite_newer=%s; make_track_yml=%s; diff=%s; delete=%s; quiet=%s",
         src_path,
         dst_path,
         include_filenames,
@@ -188,6 +188,7 @@ def copy_medialib(
         make_track_yml,
         diff,
         delete,
+        quiet,
     )
     if "" in exclude_keywords:
         log.warning(

@@ -614,8 +614,9 @@ include patterns and counts each skip reason. Matching files skipped because
 of exclude keywords, identical content, or destination overwrite rules are
 also logged at INFO; unmatched filenames remain DEBUG-only.
 Use `-q` / `--quiet` to suppress per-file skip messages (including identical,
-newer, existing, excluded, and already-converted files). Copy/delete actions,
-dry-run previews, summary counts, warnings, and errors remain visible.
+newer, existing, excluded, and already-converted files). The startup settings
+line reports `quiet=True` or `quiet=False`. Copy/delete actions, dry-run
+previews, summary counts, warnings, and errors remain visible.
 
 All `copy_*.sh` wrappers require `COPY_MEDIALIB_EXCLUDE_KEYWORDS` and pass its
 newline-separated entries to `--exclude-keywords`. An empty entry matches every
@@ -671,6 +672,32 @@ between files, including the current path and update/error counts, even when
 files need no changes. Updates retain a `.bak` copy and log a
 shell-ready `meld` command. Errors are reported and produce a nonzero exit status
 while processing continues.
+
+## Download Missing Cover Images
+
+`cover-images-auto-download` scans valid album directories under
+`$MOONGAS_COLLECTION_ROOTDIR/data` for albums missing a cover image. An album
+is covered when its directory contains a file with basename `cover` and a
+`.jpg` or `.webp` extension. For each album missing one, the LLM searches the
+web with a query like `<artist> <album> (<year>) album cover art image` and
+returns up to five direct image URLs plus whether the cover is explicit.
+Candidates are downloaded and scored: JPEG is preferred, then images of at
+least 1000x1000 pixels, then larger images. The result is saved as
+`cover.jpg`; non-JPEG images are converted with Pillow. When the cover is
+explicit and the album has an `album.yml`, `explicitCover` is set to `true`
+there, with the original backed up to `album.yml.bak`.
+
+```bash
+cover-images-auto-download --dry-run          # search and download without saving
+cover-images-auto-download --dir "/music/Artist/Album [1999]"
+cover-images-auto-download --llm=false        # only report albums missing covers
+cover-images-auto-download --force            # also replace existing covers
+```
+
+`--sleep` (default 30) paces albums; `-c`/`--count` limits how many albums are
+processed; `-q`/`--quiet` suppresses the progress bar. Downloads failing for
+individual URLs are logged and the next candidate is tried; albums with no
+usable image are reported as warnings.
 
 ## Scan Media Files into Track YAML
 

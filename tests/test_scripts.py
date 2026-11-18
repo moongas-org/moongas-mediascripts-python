@@ -494,6 +494,9 @@ def test_copy_quiet_suppresses_skip_messages(
             quiet=quiet,
         )
 
+    settings = [record.message for record in caplog.records if record.message.startswith("Copy settings: ")]
+    assert len(settings) == 1
+    assert settings[0].endswith(f"; quiet={quiet}")
     assert ("Skipping file" in caplog.text) is not quiet
     assert ("Source mtime=" in caplog.text) == (reason == "newer" and not quiet)
     assert "Scan summary" in caplog.text
