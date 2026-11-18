@@ -678,16 +678,21 @@ while processing continues.
 `cover-images-auto-download` scans valid album directories under
 `$MOONGAS_COLLECTION_ROOTDIR/data` for albums missing a cover image. An album
 is covered when its directory contains a file with basename `cover` and a
-`.jpg` or `.webp` extension. For each album missing one, the LLM searches the
-web with a query like `<artist> <album> (<year>) album cover art image` and
-returns up to five direct image URLs plus whether the cover is explicit.
+`.jpg` or `.webp` extension. For each album missing one, headless Chromium
+searches Google Images with the **Large** size filter and a query like
+`<artist> <album> (<year> album) album cover art image`. The script takes up
+to five original image URLs from the results, not from an LLM.
 Candidates are downloaded and scored: JPEG is preferred, then images of at
 least 1000x1000 pixels, then larger images. The result is saved as
-`cover.jpg`; non-JPEG images are converted with Pillow. When the cover is
-explicit and the album has an `album.yml`, `explicitCover` is set to `true`
-there, with the original backed up to `album.yml.bak`.
+`cover.jpg`; non-JPEG images are converted with Pillow. If the album has an
+`album.yml`, the LLM checks whether the album's artwork is known to be explicit.
+If so, `explicitCover` is set to `true`, with the original backed up to
+`album.yml.bak`.
 
 ```bash
+uv sync --extra cover-search --extra llm
+uv run --extra cover-search --extra llm python -m playwright install chromium
+
 cover-images-auto-download --dry-run          # search and download without saving
 cover-images-auto-download --dir "/music/Artist/Album [1999]"
 cover-images-auto-download --llm=false        # only report albums missing covers
@@ -697,7 +702,9 @@ cover-images-auto-download --force            # also replace existing covers
 `--sleep` (default 30) paces albums; `-c`/`--count` limits how many albums are
 processed; `-q`/`--quiet` suppresses the progress bar. Downloads failing for
 individual URLs are logged and the next candidate is tried; albums with no
-usable image are reported as warnings.
+usable image are reported as failures. If Google blocks automated requests,
+requires consent, or no longer shows a recognizable results grid, the batch
+stops rather than repeatedly querying Google.
 
 ## Scan Media Files into Track YAML
 

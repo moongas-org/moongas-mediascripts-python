@@ -120,6 +120,9 @@ llm = [
   "PyYAML>=6.0.3",
   "tqdm>=4.67.0",
 ]
+cover-search = [
+  "playwright>=1.51.0",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/moongas-org/moongas-mediasripts-python"
