@@ -613,6 +613,9 @@ at INFO level. After scanning, it reports how many filenames matched the
 include patterns and counts each skip reason. Matching files skipped because
 of exclude keywords, identical content, or destination overwrite rules are
 also logged at INFO; unmatched filenames remain DEBUG-only.
+Use `-q` / `--quiet` to suppress per-file skip messages (including identical,
+newer, existing, excluded, and already-converted files). Copy/delete actions,
+dry-run previews, summary counts, warnings, and errors remain visible.
 
 All `copy_*.sh` wrappers require `COPY_MEDIALIB_EXCLUDE_KEYWORDS` and pass its
 newline-separated entries to `--exclude-keywords`. An empty entry matches every

@@ -136,6 +136,7 @@ def copy_medialib(
     make_track_yml: bool = False,
     diff: bool = False,
     delete: bool = False,
+    quiet: bool = False,
 ) -> CopyResults:
     """
     Recursively copy files (e.g. album cover images) from src medialib directory
@@ -248,9 +249,10 @@ def copy_medialib(
             if not any(
                 fnmatch.fnmatch(src_fname, pattern) for pattern in include_filenames
             ):
-                log.debug(
-                    f"Skipping file '{src_file_abs_path}' because its filename is not included"
-                )
+                if not quiet:
+                    log.debug(
+                        f"Skipping file '{src_file_abs_path}' because its filename is not included"
+                    )
                 ret = ret._replace(skipped=ret.skipped + 1)
                 skip_counts["filename_not_included"] += 1
                 continue
@@ -262,11 +264,12 @@ def copy_medialib(
             skip = False
             for keyword in exclude_keywords:
                 if str(src_file_abs_path).find(keyword) != -1:
-                    log.info(
-                        "Skipping file '%s' based on exclude keyword %r",
-                        src_file_abs_path,
-                        keyword,
-                    )
+                    if not quiet:
+                        log.info(
+                            "Skipping file '%s' based on exclude keyword %r",
+                            src_file_abs_path,
+                            keyword,
+                        )
                     skip = True
             if skip:
                 ret = ret._replace(skipped=ret.skipped + 1)
@@ -292,10 +295,11 @@ def copy_medialib(
             if dst_abs_path.exists() and _files_are_identical(
                 src_file_abs_path, dst_abs_path
             ):
-                log.info(
-                    f"Skipping file '{src_file_abs_path}' because it is identical "
-                    f"to destination file '{dst_abs_path}'"
-                )
+                if not quiet:
+                    log.info(
+                        f"Skipping file '{src_file_abs_path}' because it is identical "
+                        f"to destination file '{dst_abs_path}'"
+                    )
                 ret = ret._replace(skipped=ret.skipped + 1)
                 skip_counts["identical_destination"] += 1
                 continue
@@ -306,26 +310,29 @@ def copy_medialib(
                 and dst_abs_path.exists()
                 and dst_abs_path.stat().st_mtime > src_file_abs_path.stat().st_mtime
             ):
-                log.info(
-                    f"Skipping file '{src_file_abs_path}' because the destination file "
-                    f"'{dst_abs_path}' is newer"
-                )
+                if not quiet:
+                    log.info(
+                        f"Skipping file '{src_file_abs_path}' because the destination file "
+                        f"'{dst_abs_path}' is newer"
+                    )
                 ret = ret._replace(skipped=ret.skipped + 1)
                 skip_counts["newer_destination"] += 1
-                log.info(
-                    "Source mtime=%s; destination mtime=%s; --overwrite-existing does not "
-                    "replace newer files (use --overwrite-newer to allow this)",
-                    src_file_abs_path.stat().st_mtime,
-                    dst_abs_path.stat().st_mtime,
-                )
+                if not quiet:
+                    log.info(
+                        "Source mtime=%s; destination mtime=%s; --overwrite-existing does not "
+                        "replace newer files (use --overwrite-newer to allow this)",
+                        src_file_abs_path.stat().st_mtime,
+                        dst_abs_path.stat().st_mtime,
+                    )
                 continue
 
             # Don't copy if it exists unless overwrite_existing==True.
             if not overwrite_existing and dst_abs_path.exists():
-                log.info(
-                    f"Skipping file '{src_file_abs_path}' because the destination file "
-                    f"'{dst_abs_path}' already exists"
-                )
+                if not quiet:
+                    log.info(
+                        f"Skipping file '{src_file_abs_path}' because the destination file "
+                        f"'{dst_abs_path}' already exists"
+                    )
                 ret = ret._replace(skipped=ret.skipped + 1)
                 skip_counts["existing_destination"] += 1
                 continue
@@ -340,10 +347,11 @@ def copy_medialib(
                 dst_fbase, _ = os.path.splitext(dst_abs_path)
                 dst_abs_path_converted = Path(dst_fbase + ".webp")
                 if dst_abs_path_converted.exists():
-                    log.info(
-                        f"Skipping file '{src_file_abs_path}' because the converted "
-                        f"destination file '{dst_abs_path_converted}' already exists"
-                    )
+                    if not quiet:
+                        log.info(
+                            f"Skipping file '{src_file_abs_path}' because the converted "
+                            f"destination file '{dst_abs_path_converted}' already exists"
+                        )
                     ret = ret._replace(skipped=ret.skipped + 1)
                     skip_counts["converted_destination"] += 1
                     continue
@@ -414,6 +422,7 @@ def copy_medialibs(
     make_track_yml: bool = False,
     diff: bool = False,
     delete: bool = False,
+    quiet: bool = False,
 ) -> CopyResults:
     """
     Copies files* from one or more medialib directories from src directory to
@@ -468,6 +477,7 @@ def copy_medialibs(
             make_track_yml=make_track_yml,
             diff=diff,
             delete=delete,
+            quiet=quiet,
         )
         log.info(
             f"Total copied for medialib dir {src_path}: would be copied: {ret_tmp.would_be_copied}; actually copied: {ret_tmp.actually_copied}; skipped: {ret_tmp.skipped}; errors: {ret_tmp.errors};"
@@ -544,6 +554,10 @@ def parse_args():
         help="Delete matching destination-only files (PreserveStructure mode only). "
         "Excluded paths are protected; --dry-run only reports deletions.",
     )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="Suppress per-file skip messages; keep changes, summaries, warnings, and errors.",
+    )
     overwrite_group = parser.add_mutually_exclusive_group()
     overwrite_group.add_argument(
         "--overwrite-existing",
@@ -604,6 +618,7 @@ def main():
         make_track_yml=args.make_track_yml,
         diff=args.diff,
         delete=args.delete,
+        quiet=args.quiet,
     )
 
 

@@ -467,3 +467,61 @@ def test_parse_args_delete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     args = parse_args()
     assert args.delete
     assert args.dry_run
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+@pytest.mark.parametrize("reason", ["identical", "newer", "existing", "excluded", "converted", "unmatched"])
+def test_copy_quiet_suppresses_skip_messages(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, quiet: bool, reason: str,
+) -> None:
+    source = tmp_path / "source" / "Music"
+    destination = tmp_path / "destination"
+    target = destination / "Music"
+    source.mkdir(parents=True)
+    target.mkdir(parents=True)
+    name = "cover.jpg"
+    (source / name).write_text("source")
+    if reason in {"identical", "newer", "existing"}:
+        (target / name).write_text("source" if reason == "identical" else "different")
+        os.utime(source / name, (100, 100))
+        os.utime(target / name, (200 if reason == "newer" else 50,) * 2)
+    if reason == "converted":
+        (target / "cover.webp").write_text("converted")
+    with caplog.at_level(logging.DEBUG):
+        result = copy_medialibs(
+            [source], destination, include_filenames=["*.yml" if reason == "unmatched" else "*.jpg"],
+            exclude_keywords=["cover"] if reason == "excluded" else [],
+            quiet=quiet,
+        )
+
+    assert ("Skipping file" in caplog.text) is not quiet
+    assert ("Source mtime=" in caplog.text) == (reason == "newer" and not quiet)
+    assert "Scan summary" in caplog.text
+    assert result.skipped == 1
+    assert result.actually_copied == 0
+
+
+def test_copy_quiet_preserves_changes_and_warnings(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    (source / "new.yml").write_text("new")
+    (destination / "old.yml").write_text("old")
+    with caplog.at_level(logging.INFO):
+        result = copy_medialib(
+            source, destination, include_filenames=["*.yml"], quiet=True, delete=True, dry_run=True,
+        )
+        copy_medialib(source, destination, quiet=True, exclude_keywords=[""], dry_run=True)
+
+    assert "create: meld" in caplog.text
+    assert "Would delete" in caplog.text
+    assert "excludes every included file" in caplog.text
+    assert result.would_be_copied == result.would_be_deleted == 1
+    assert not (destination / "new.yml").exists()
+    assert (destination / "old.yml").exists()
+
+
+@pytest.mark.parametrize("flag", ["-q", "--quiet"])
+def test_parse_args_quiet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
+    monkeypatch.setattr(sys, "argv", ["copy-medialib", "--dst-path", str(tmp_path), flag])
+    assert parse_args().quiet
