@@ -489,3 +489,49 @@ def test_musicbrainz_stops_after_retry_budget(monkeypatch: pytest.MonkeyPatch) -
 
     assert request.call_count == 5
     assert waits == [2.0, 4.0, 8.0, 16.0]
+
+
+def test_musicbrainz_batch_continues_after_an_album_exhausts_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    artist_dir = tmp_path / "data" / "Music" / "Artist"
+    first = artist_dir / "First [2000]"
+    second = artist_dir / "Second [2001]"
+    first.mkdir(parents=True)
+    second.mkdir()
+    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    clock = 0.0
+    requests: list[tuple[str, float]] = []
+    mbid = "00000000-0000-0000-0000-000000000001"
+
+    def sleep(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        url = urlsplit(request.full_url)
+        if url.hostname == "coverartarchive.org":
+            return BytesIO(LARGE_JPEG)
+        query = parse_qs(url.query)["query"][0]
+        requests.append((query, clock))
+        if '"First"' in query:
+            headers = Message()
+            if len(requests) == 5:
+                headers["Retry-After"] = "12"
+            raise HTTPError(request.full_url, 503, "Unavailable", headers, None)
+        assert '"Second"' in query
+        return BytesIO(json.dumps({"release-groups": [
+            {"id": mbid, "title": "Second", "artist-credit": [{"name": "Artist"}], "first-release-date": "2001"},
+        ]}).encode())
+
+    monkeypatch.setattr(download, "time", MagicMock(monotonic=lambda: clock, sleep=sleep))
+    monkeypatch.setattr(download, "urlopen", fake_urlopen)
+    caplog.set_level(logging.INFO, logger=download.__name__)
+
+    assert not download.main_loop(0, quiet=True, source="musicbrainz", explicit_check=False)
+    assert [started for _, started in requests] == [0, 2, 6, 14, 30, 42]
+    assert sum('"First"' in query for query, _ in requests) == 5
+    assert not (first / "cover.jpg").exists()
+    assert (second / "cover.jpg").read_bytes() == LARGE_JPEG
+    assert f"[{first}] Skipping album: MusicBrainz returned HTTP 503 after 5 attempts" in caplog.messages
+    assert "Cover download complete: 1 succeeded, 1 failed" in caplog.messages

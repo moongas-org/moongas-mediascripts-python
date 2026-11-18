@@ -81,6 +81,10 @@ class MusicBrainzError(RuntimeError):
     """MusicBrainz is throttling requests or unavailable."""
 
 
+class MusicBrainzRetriesExhausted(MusicBrainzError):
+    """The current album lookup ran out of retries."""
+
+
 class _YamlRoundTrip(Protocol):
     def load(self, stream: Path) -> object: ...
     def dump(self, data: object, stream: TextWriter) -> None: ...
@@ -279,13 +283,17 @@ def musicbrainz_search() -> CoverSearch:
                 error.close()
                 if error.code not in MUSICBRAINZ_RETRY_STATUSES:
                     raise
-                if attempt == MUSICBRAINZ_MAX_ATTEMPTS:
-                    raise MusicBrainzError(f"MusicBrainz returned HTTP {error.code} after {attempt} attempts") from error
                 server_delay = retry_after_seconds(retry_after) if retry_after is not None else None
                 if server_delay is not None and server_delay > MUSICBRAINZ_MAX_RETRY_DELAY:
                     raise MusicBrainzError(
                         f"MusicBrainz returned HTTP {error.code} and asked to retry in {server_delay:.0f}s, "
                         f"above the {MUSICBRAINZ_MAX_RETRY_DELAY:.0f}s limit; try again later"
+                    ) from error
+                if attempt == MUSICBRAINZ_MAX_ATTEMPTS:
+                    if server_delay is not None:
+                        next_request = max(next_request, time.monotonic() + server_delay)
+                    raise MusicBrainzRetriesExhausted(
+                        f"MusicBrainz returned HTTP {error.code} after {attempt} attempts"
                     ) from error
                 retry_delay = max(2.0 ** attempt, server_delay if server_delay is not None else 0.0)
                 logger.warning(
@@ -440,6 +448,8 @@ def process_album(
         if explicit_check and (album_dir / "album.yml").is_file() and is_explicit_cover(get_client(), artist, album, year):
             set_explicit_cover(album_dir, dry_run)
         return True
+    except MusicBrainzRetriesExhausted as error:
+        logger.error("[%s] Skipping album: %s", album_dir, error)
     except APIStatusError as error:
         logger.error(
             "[%s] Provider returned HTTP %d: %s. Check LLM_BASE_URL, LLM_API_KEY, and LLM_MODEL.",

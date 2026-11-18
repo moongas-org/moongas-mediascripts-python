@@ -686,8 +686,10 @@ image has more pixels. This source requires no browser or
 search API key. MusicBrainz lookup requests are spaced at least 1.1 seconds apart.
 At INFO level, each attempt logs the HTTP method, full encoded URL, and request headers.
 Rate limits and temporary server errors are retried up to four times with
-exponential backoff and respect `Retry-After`. The batch stops if all attempts
-fail or the server requests a wait longer than two minutes.
+exponential backoff and respect `Retry-After`. If retries are exhausted, the
+album is counted as failed and the batch continues with the next album. The
+command still returns a nonzero exit status if any album failed. The batch
+stops if the server requests a wait longer than two minutes.
 
 The default `--source google` uses headless Chromium to search Google Images
 with the **Large** size filter and a query like
