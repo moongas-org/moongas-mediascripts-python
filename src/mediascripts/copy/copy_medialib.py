@@ -28,6 +28,52 @@ class CopyResults(NamedTuple):
     actually_copied: int
     skipped: int
     errors: int
+    would_be_deleted: int = 0
+    actually_deleted: int = 0
+
+
+def _validate_delete_paths(src_path: Path, dst_path: Path, mode: DirCopyMode) -> None:
+    if mode != DirCopyMode.PreserveStructure:
+        raise ValueError("--delete requires PreserveStructure mode; numbered flat files have no source-path identity")
+    if not src_path.is_dir():
+        raise ValueError(f"Refusing --delete with a missing or invalid source directory: {src_path}")
+    source, destination = src_path.resolve(), dst_path.resolve()
+    if source.is_relative_to(destination) or destination.is_relative_to(source):
+        raise ValueError("--delete requires non-overlapping source and destination directories")
+
+
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
+def _deletion_candidates(
+    src_path: Path, dst_path: Path, expected: set[Path],
+    include_filenames: list[str], exclude_keywords: list[str], make_track_yml: bool,
+) -> list[Path]:
+    patterns = (
+        [os.path.splitext(pattern)[0] + ".yml" for pattern in include_filenames]
+        if make_track_yml else include_filenames
+    )
+    candidates: list[Path] = []
+    if not dst_path.exists():
+        return candidates
+    for root, _, files in os.walk(dst_path, followlinks=False, onerror=_raise_walk_error):
+        for filename in files:
+            path = Path(root) / filename
+            relative = path.relative_to(dst_path)
+            if relative in expected or not any(fnmatch.fnmatch(filename, pattern) for pattern in patterns):
+                continue
+            source_path = src_path / relative
+            if not make_track_yml and (source_path.exists() or source_path.is_symlink()):
+                continue
+            # Source directory symlinks are not scanned by the copying walk.
+            if any((src_path / parent).is_symlink() for parent in relative.parents):
+                continue
+            if any(keyword in str(source_path) for keyword in exclude_keywords):
+                continue
+            if path.is_file() or path.is_symlink():
+                candidates.append(path)
+    return sorted(candidates)
 
 
 def _files_are_identical(first_path: Path, second_path: Path) -> bool:
@@ -89,6 +135,7 @@ def copy_medialib(
     overwrite_newer: bool = False,
     make_track_yml: bool = False,
     diff: bool = False,
+    delete: bool = False,
 ) -> CopyResults:
     """
     Recursively copy files (e.g. album cover images) from src medialib directory
@@ -110,19 +157,25 @@ def copy_medialib(
     The files to be copied are determined in a first pass (building a list of
     (src, dst) pairs and logging the count) before any copying begins.
 
+    With delete=True, matching destination-only files are deleted after copying.
+    Excluded paths and directories are retained; dry runs only report deletions.
+    Deletion requires structure-preserving mode and non-overlapping valid paths.
+
     Returns number it copied (or would have copied if not dry_run)
     """
     if overwrite_newer and overwrite_existing:
         raise ValueError(
             "overwrite_newer and overwrite_existing are mutually exclusive"
         )
+    if delete:
+        _validate_delete_paths(src_path, dst_path, dir_copy_mode)
     if overwrite_newer:
         overwrite_existing = True
 
     log.info(
         "Copy settings: source=%s; destination=%s; include_filenames=%r; "
         "exclude_keywords=%r; mode=%s; dry_run=%s; overwrite_existing=%s; "
-        "overwrite_newer=%s; make_track_yml=%s; diff=%s",
+        "overwrite_newer=%s; make_track_yml=%s; diff=%s; delete=%s",
         src_path,
         dst_path,
         include_filenames,
@@ -133,6 +186,7 @@ def copy_medialib(
         overwrite_newer,
         make_track_yml,
         diff,
+        delete,
     )
     if "" in exclude_keywords:
         log.warning(
@@ -167,6 +221,7 @@ def copy_medialib(
     # First pass: build the list of (src, dst) file pairs to copy,
     # applying all skip rules, before copying anything
     copy_list: list[tuple[Path, Path]] = []
+    expected: set[Path] = set()
     skip_counts = {
         "filename_not_included": 0,
         "excluded_keyword": 0,
@@ -181,7 +236,11 @@ def copy_medialib(
         unit=" files",
         disable=not sys.stderr.isatty(),
     )
-    for root, dirs, files in os.walk(src_path, topdown=False):
+    source_walk = (
+        os.walk(src_path, topdown=False, onerror=_raise_walk_error)
+        if delete else os.walk(src_path, topdown=False)
+    )
+    for root, dirs, files in source_walk:
         for src_fname in files:
             scan_progress.update(1)
             src_file_abs_path = Path(root).joinpath(src_fname)
@@ -196,6 +255,9 @@ def copy_medialib(
                 skip_counts["filename_not_included"] += 1
                 continue
             included_count += 1
+            if delete:
+                relative = src_file_abs_path.relative_to(src_path)
+                expected.add(relative.with_suffix(".yml") if make_track_yml else relative)
             # skip files with any exclude keywords anywhere in the file path
             skip = False
             for keyword in exclude_keywords:
@@ -289,6 +351,12 @@ def copy_medialib(
             copy_list.append((src_file_abs_path, dst_abs_path))
 
     scan_progress.close()
+    delete_list = (
+        _deletion_candidates(
+            src_path, dst_path, expected, include_filenames, exclude_keywords, make_track_yml,
+        )
+        if delete else []
+    )
     log.info(
         "Scan summary for '%s': matched include patterns=%d; queued=%d; skip reasons: %s",
         src_path,
@@ -317,6 +385,19 @@ def copy_medialib(
                 shutil.copy(src_file_abs_path, dst_abs_path)
             ret = ret._replace(actually_copied=ret.actually_copied + 1)
         ret = ret._replace(would_be_copied=ret.would_be_copied + 1)
+    if delete_list:
+        _validate_delete_paths(src_path, dst_path, dir_copy_mode)
+    for path in delete_list:
+        log.info("%s: %s", "Would delete" if dry_run else "Deleting", path)
+        if not dry_run:
+            path.unlink()
+            ret = ret._replace(actually_deleted=ret.actually_deleted + 1)
+        ret = ret._replace(would_be_deleted=ret.would_be_deleted + 1)
+    if delete:
+        log.info(
+            "Deletion summary: would be deleted: %d; actually deleted: %d",
+            ret.would_be_deleted, ret.actually_deleted,
+        )
     return ret
 
 
@@ -332,6 +413,7 @@ def copy_medialibs(
     overwrite_newer: bool = False,
     make_track_yml: bool = False,
     diff: bool = False,
+    delete: bool = False,
 ) -> CopyResults:
     """
     Copies files* from one or more medialib directories from src directory to
@@ -359,6 +441,14 @@ def copy_medialibs(
             "overwrite_newer and overwrite-existing are mutually exclusive"
         )
 
+    if delete:
+        destinations = [dst_root_path / source.name for source in src_paths]
+        if len({path.resolve() for path in destinations}) != len(destinations):
+            raise ValueError("--delete requires unique destination directory names for source libraries")
+        for source in src_paths:
+            for destination in destinations:
+                _validate_delete_paths(source, destination, dir_copy_mode)
+
     ret = CopyResults(
         would_be_copied=0,
         actually_copied=0,
@@ -377,6 +467,7 @@ def copy_medialibs(
             overwrite_newer=overwrite_newer,
             make_track_yml=make_track_yml,
             diff=diff,
+            delete=delete,
         )
         log.info(
             f"Total copied for medialib dir {src_path}: would be copied: {ret_tmp.would_be_copied}; actually copied: {ret_tmp.actually_copied}; skipped: {ret_tmp.skipped}; errors: {ret_tmp.errors};"
@@ -386,10 +477,17 @@ def copy_medialibs(
             actually_copied=ret.actually_copied + ret_tmp.actually_copied,
             skipped=ret.skipped + ret_tmp.skipped,
             errors=ret.errors + ret_tmp.errors,
+            would_be_deleted=ret.would_be_deleted + ret_tmp.would_be_deleted,
+            actually_deleted=ret.actually_deleted + ret_tmp.actually_deleted,
         )
     log.info(
         f"Grand total copied for all medialib dirs: would be copied: {ret.would_be_copied}; actually copied: {ret.actually_copied}; skipped: {ret.skipped}; errors: {ret.errors}"
     )
+    if delete:
+        log.info(
+            "Grand total deleted for all medialib dirs: would be deleted: %d; actually deleted: %d",
+            ret.would_be_deleted, ret.actually_deleted,
+        )
     return ret
 
 
@@ -397,19 +495,6 @@ def copy_covers():
     copy_medialibs(
         src_paths=[Path("/data/Music"), Path("/data/MusicOther")],
         dst_root_path=Path("/data/Covers"),
-        include_filenames=["cover.jpg"],
-        exclude_keywords=[],
-        dry_run=False,
-        dir_copy_mode=DirCopyMode.PreserveStructure,
-        overwrite_existing=False,
-        overwrite_newer=False,
-    )
-
-
-def copy_artist_yaml():
-    copy_medialibs(
-        src_paths=[Path("/data/Music"), Path("/data/MusicOther")],
-        dst_root_path=Path("/home/user/Git/moongas-org/moongas/moongas-library"),
         include_filenames=["cover.jpg"],
         exclude_keywords=[],
         dry_run=False,
@@ -453,6 +538,11 @@ def parse_args():
         "--dry-run",
         action="store_true",
         help="Perform a trial run without making actual file changes.",
+    )
+    parser.add_argument(
+        "--delete", action="store_true",
+        help="Delete matching destination-only files (PreserveStructure mode only). "
+        "Excluded paths are protected; --dry-run only reports deletions.",
     )
     overwrite_group = parser.add_mutually_exclusive_group()
     overwrite_group.add_argument(
@@ -513,6 +603,7 @@ def main():
         overwrite_newer=args.overwrite_newer,
         make_track_yml=args.make_track_yml,
         diff=args.diff,
+        delete=args.delete,
     )
 
 

@@ -624,6 +624,21 @@ Before each copy or `--make-track-yml` write, missing destination parent
 directories are created, including artist and album directories. Dry runs
 do not create directories.
 
+Use `--delete` to remove destination-only files matching the include filename
+globs, while retaining excluded paths and all directories. Files with source
+counterparts remain protected even when copying is skipped (for example, because
+the destination is newer or identical). With `--make-track-yml`, matching and
+counterparts use the generated `.yml` names instead of the source extensions.
+Deletion runs after successful copying; each deletion and its totals are logged.
+Preview first with `--delete --dry-run`; no files or directories are changed.
+
+`--delete` requires the default `PreserveStructure` mode, existing source
+directories, non-overlapping source/destination paths, and unique destination
+library names. It refuses numbered `SingleDirectory` mode because those names
+cannot reliably be mapped back to source paths. Scan errors abort deletion.
+Destination directory symlinks are not traversed, and subtrees corresponding to
+unscanned source directory symlinks are protected.
+
 ## Reformat Track YAML
 
 `track-yaml-reformat` converts non-empty flow-style mappings and sequences to
