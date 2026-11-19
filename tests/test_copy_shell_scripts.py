@@ -101,12 +101,18 @@ def test_copy_scripts_exclude_matching_files(
 
 
 @pytest.mark.parametrize("keywords", ["", "\nExcluded Artist\n\n"])
+@pytest.mark.parametrize("symlink_source", [False, True])
 def test_copy_all_yaml_wrapper_deletes_only_unexcluded_orphans(
-    tmp_path: Path, copy_command_path: str, keywords: str,
+    tmp_path: Path, copy_command_path: str, keywords: str, symlink_source: bool,
 ) -> None:
     source = tmp_path / "local" / "data" / "Music"
     destination = tmp_path / "demo" / "data" / "Music"
     album = Path("The Strokes") / "Room On Fire [2003]"
+    if symlink_source:
+        library = tmp_path / "library"
+        library.mkdir()
+        source.parent.mkdir(parents=True)
+        source.symlink_to(library, target_is_directory=True)
     (source / album).mkdir(parents=True)
     (source / album / "keep.yml").touch()
     (destination / album).mkdir(parents=True)

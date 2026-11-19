@@ -641,8 +641,9 @@ Preview first with `--delete --dry-run`; no files or directories are changed.
 directories, non-overlapping source/destination paths, and unique destination
 library names. It refuses numbered `SingleDirectory` mode because those names
 cannot reliably be mapped back to source paths. Scan errors abort deletion.
-Destination directory symlinks are not traversed, and subtrees corresponding to
-unscanned source directory symlinks are protected.
+Library roots may be symlinks. Nested destination directory symlinks are not
+traversed, and subtrees corresponding to nested source directory symlinks are
+protected.
 
 ## Reformat Track YAML
 

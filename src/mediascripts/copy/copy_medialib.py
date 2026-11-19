@@ -66,8 +66,8 @@ def _deletion_candidates(
             source_path = src_path / relative
             if not make_track_yml and (source_path.exists() or source_path.is_symlink()):
                 continue
-            # Source directory symlinks are not scanned by the copying walk.
-            if any((src_path / parent).is_symlink() for parent in relative.parents):
+            # os.walk scans a symlink passed as its root, but not nested directory symlinks.
+            if any(parent.parts and (src_path / parent).is_symlink() for parent in relative.parents):
                 continue
             if any(keyword in str(source_path) for keyword in exclude_keywords):
                 continue
