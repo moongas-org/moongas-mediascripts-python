@@ -3,7 +3,8 @@
 An album is missing a cover when its directory has no file with basename
 "cover" and a supported extension (.jpg or .webp). Choose Google Images
 with the Large filter or MusicBrainz with Cover Art Archive. MusicBrainz checks
-release-group artwork, individual pressings, and then parent albums for singles.
+release-group artwork, individual pressings, Discogs (if configured), and then
+parent albums for singles.
 The LLM checks whether
 the album's front cover is known to be explicit and can optionally correct artist
 and release titles before a MusicBrainz search.
@@ -23,7 +24,7 @@ import re
 import tempfile
 import time
 import unicodedata
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from io import BytesIO
@@ -72,6 +73,10 @@ MUSICBRAINZ_MIN_INTERVAL = 1.1
 MUSICBRAINZ_MAX_ATTEMPTS = 5
 MUSICBRAINZ_MAX_RETRY_DELAY = 120.0
 MUSICBRAINZ_RETRY_STATUSES = {429, 502, 503, 504}
+DISCOGS_API = "https://api.discogs.com"
+DISCOGS_MIN_INTERVAL = 1.1
+DISCOGS_MAX_RETRY_DELAY = 120.0
+DISCOGS_RESULTS_LIMIT = 5
 
 SYSTEM_PROMPT = """Reply with only true or false. Reply true only if the requested album's
 front cover artwork is known to show nudity, sexual imagery, graphic violence, or
@@ -92,6 +97,7 @@ class ArtworkCandidate:
     urls: list[str]
     parent_title: str | None = None
     parent_year: int | None = None
+    source: str | None = None
 
 
 CoverSearch = Callable[[str, str, int], list[str] | Generator[ArtworkCandidate, None, None]]
@@ -407,8 +413,138 @@ def musicbrainz_parent_albums(
     return [(mbid, title, album_year) for mbid, (title, album_year) in ordered]
 
 
+def discogs_links(payload: object) -> Generator[tuple[str, str], None, None]:
+    for relation in json_items(json_fields(payload).get("relations")):
+        fields = json_fields(relation)
+        resource = json_fields(fields.get("url")).get("resource")
+        if fields.get("type") != "discogs" or not isinstance(resource, str):
+            continue
+        match = re.fullmatch(
+            r"https?://(?:www\.)?discogs\.com/(master|release)/([0-9]+)(?:-[^/?#]+)?/?(?:[?#].*)?",
+            resource,
+            flags=re.IGNORECASE | re.ASCII,
+        )
+        if match:
+            yield match[1].lower(), match[2]
+
+
+def discogs_image_url(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "i.discogs.com"
+        or not parsed.path or parsed.path.lower().endswith("/spacer.gif")
+    ):
+        return None
+    return parsed._replace(scheme="https").geturl()
+
+
+def discogs_search_matches(value: object, artist: str, title: str) -> bool:
+    if not isinstance(value, str):
+        return False
+
+    def artist_key(name: str) -> str:
+        return musicbrainz_name(re.sub(r"\s+\([0-9]+\)$", "", name.strip()).replace("&", " and "))
+
+    parts = value.split(" - ")
+    return any(
+        artist_key(" - ".join(parts[:index])) == artist_key(artist)
+        and musicbrainz_name(" - ".join(parts[index:])) == musicbrainz_name(title)
+        for index in range(1, len(parts))
+    )
+
+
+def discogs_search(
+    token: str,
+) -> Callable[[Iterable[tuple[str, str]], str, str, int], Generator[ArtworkCandidate, None, None]]:
+    next_request = 0.0
+    blocked_until = 0.0
+    auth_failed = False
+
+    def request_json(path: str) -> dict[str, object]:
+        nonlocal next_request, blocked_until, auth_failed
+        if auth_failed or time.monotonic() < blocked_until:
+            return {}
+        request = Request(f"{DISCOGS_API}/{path}", headers={
+            "User-Agent": MUSICBRAINZ_USER_AGENT, "Accept": "application/json",
+        })
+        request.add_unredirected_header("Authorization", f"Discogs token={token}")
+        for attempt in range(2):
+            delay = next_request - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            next_request = time.monotonic() + DISCOGS_MIN_INTERVAL
+            try:
+                with urlopen(request, timeout=30) as response:
+                    payload: object = json.load(response)
+                if not isinstance(payload, dict):
+                    raise ValueError("Expected a JSON object from Discogs")
+                return cast(dict[str, object], payload)
+            except HTTPError as error:
+                retry_after = error.headers.get("Retry-After")
+                error.close()
+                if error.code == 429:
+                    wait = retry_after_seconds(retry_after) if retry_after else None
+                    wait = max(DISCOGS_MIN_INTERVAL, wait if wait is not None else 60.0)
+                    if attempt == 0 and wait <= DISCOGS_MAX_RETRY_DELAY:
+                        logger.warning("Discogs rate limited; retrying in %.1fs", wait)
+                        next_request = time.monotonic() + wait
+                        continue
+                    blocked_until = time.monotonic() + wait
+                    logger.warning("Discogs rate limited; skipping Discogs requests for %.1fs", wait)
+                elif error.code in {401, 403}:
+                    auth_failed = True
+                    logger.warning("Discogs rejected authentication (HTTP %d); check DISCOGS_TOKEN", error.code)
+                elif error.code != 404:
+                    logger.warning("Discogs request failed (HTTP %d)", error.code)
+                return {}
+            except OSError as error:
+                logger.warning("Discogs request failed (%s)", type(error).__name__)
+                return {}
+            except ValueError:
+                logger.warning("Discogs returned an invalid JSON response")
+                return {}
+        return {}
+
+    def search(
+        links: Iterable[tuple[str, str]], artist: str, title: str, year: int,
+    ) -> Generator[ArtworkCandidate, None, None]:
+        if auth_failed or time.monotonic() < blocked_until:
+            return
+        seen_links: set[tuple[str, str]] = set()
+        seen_images: set[str] = set()
+        for kind, identifier in links:
+            if (kind, identifier) in seen_links:
+                continue
+            seen_links.add((kind, identifier))
+            images = [json_fields(image) for image in json_items(request_json(f"{kind}s/{identifier}").get("images"))]
+            for image in sorted(images, key=lambda fields: fields.get("type") != "primary"):
+                if (url := discogs_image_url(image.get("uri"))) and url not in seen_images:
+                    seen_images.add(url)
+                    yield ArtworkCandidate([url], source="Discogs (MusicBrainz link)")
+            if auth_failed or time.monotonic() < blocked_until:
+                return
+        for kind in ("master", "release"):
+            query = urlencode({"artist": artist, "release_title": title, "type": kind, "per_page": DISCOGS_RESULTS_LIMIT})
+            results = [json_fields(item) for item in json_items(request_json(f"database/search?{query}").get("results"))]
+            for result in sorted(results, key=lambda fields: str(fields.get("year")) != str(year)):
+                if not discogs_search_matches(result.get("title"), artist, title):
+                    continue
+                if (url := discogs_image_url(result.get("cover_image"))) and url not in seen_images:
+                    seen_images.add(url)
+                    yield ArtworkCandidate([url], source=f"Discogs ({kind} search)")
+
+    return search
+
+
 def musicbrainz_search() -> CoverSearch:
     next_request = 0.0
+    token = os.environ.get("DISCOGS_TOKEN", "").strip()
+    search_discogs = discogs_search(token) if token else None
 
     def request_json(entity: str, params: dict[str, str | int]) -> object:
         nonlocal next_request
@@ -453,24 +589,40 @@ def musicbrainz_search() -> CoverSearch:
         else:
             raise AssertionError("MusicBrainz request loop exhausted")
 
-    def group_art(mbid: UUID) -> Generator[list[str], None, None]:
+    def group_art(mbid: UUID, release_links: list[tuple[str, str]] | None = None) -> Generator[list[str], None, None]:
         yield from archive_art("release-group", mbid)
-        payload = request_json("release", {"release-group": str(mbid), "limit": 50})
+        params: dict[str, str | int] = {"release-group": str(mbid), "limit": 50}
+        if release_links is not None:
+            params["inc"] = "url-rels"
+        payload = request_json("release", params)
         for release in response_items(payload, "releases"):
+            if release_links is not None:
+                release_links.extend(discogs_links(release))
             if (release_id := musicbrainz_id(json_fields(release))) is not None:
                 yield from archive_art("release", release_id)
+
+    def linked_discogs(mbid: UUID, release_links: list[tuple[str, str]]) -> Generator[tuple[str, str], None, None]:
+        try:
+            group = request_json(f"release-group/{mbid}", {"inc": "url-rels"})
+        except (OSError, ValueError, MusicBrainzRetriesExhausted) as error:
+            logger.warning("Could not load MusicBrainz Discogs links for %s: %s", mbid, error)
+        else:
+            yield from discogs_links(group)
+        yield from release_links
 
     def search(artist: str, album: str, year: int) -> Generator[ArtworkCandidate, None, None]:
         artist_query = f"artist:{json.dumps(artist, ensure_ascii=False)}"
         title = json.dumps(album, ensure_ascii=False)
         payload = request_json("release-group", {"query": f"{artist_query} AND releasegroup:{title}", "limit": 25})
         match = musicbrainz_release_group(payload, artist, album, year)
-        if match is None:
-            return
-        mbid, primary_type = match
-        for urls in group_art(mbid):
-            yield ArtworkCandidate(urls)
-        if primary_type == "Single":
+        release_links: list[tuple[str, str]] = []
+        if match is not None:
+            for urls in group_art(match[0], release_links if search_discogs is not None else None):
+                yield ArtworkCandidate(urls)
+        if search_discogs is not None:
+            links = linked_discogs(match[0], release_links) if match is not None else ()
+            yield from search_discogs(links, artist, album, year)
+        if match is not None and match[1] == "Single":
             payload = request_json(
                 "recording", {"query": f"recording:{title} AND {artist_query} AND primarytype:album", "limit": 25},
             )
@@ -686,6 +838,8 @@ def process_album(
                 continue
             if candidate.parent_title is not None:
                 logger.info("[%s] Using parent album artwork from %r", album_dir, candidate.parent_title)
+            elif candidate.source is not None:
+                logger.info("[%s] Using artwork from %s", album_dir, candidate.source)
             save_cover(album_dir, data, is_jpeg, dry_run)
             if explicit_check and (album_dir / "album.yml").is_file() and is_explicit_cover(
                 get_client(), matched_artist, candidate.parent_title or matched_title, candidate.parent_year or year,

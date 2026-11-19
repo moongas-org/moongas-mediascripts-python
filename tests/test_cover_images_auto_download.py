@@ -38,6 +38,11 @@ def archive_metadata(*images: dict[str, object]) -> BytesIO:
     return BytesIO(json.dumps({"images": images}).encode())
 
 
+@pytest.fixture(autouse=True)
+def clear_discogs_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DISCOGS_TOKEN", raising=False)
+
+
 @pytest.fixture
 def album(tmp_path: Path) -> Path:
     directory = tmp_path / "data" / "Music" / "Artist_Name" / "Album_ Name [1999]"
@@ -529,6 +534,125 @@ def test_musicbrainz_falls_back_in_order_to_usable_artwork(
     if stage != "none":
         assert (album / "cover.jpg").read_bytes() == LARGE_JPEG
     assert ("Using parent album artwork from 'Picture This'" in caplog.text) == (stage == "parent")
+
+
+@pytest.mark.parametrize("winner", ["master-link", "release-link", "master", "release", "parent", "no-group"])
+def test_discogs_fallback_order(
+    album: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, winner: str,
+) -> None:
+    artist, title, year = download.album_metadata(album)
+    group = "00000000-0000-0000-0000-000000000001"
+    pressing = "00000000-0000-0000-0000-000000000002"
+    events: list[str] = []
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        url = urlsplit(request.full_url)
+        query = parse_qs(url.query)
+        event = url.path
+        if url.hostname == "api.discogs.com":
+            assert request.get_header("Authorization") == "Discogs token=test-token"
+            assert "Authorization" not in request.headers
+        else:
+            assert not request.has_header("Authorization")
+        assert request.get_header("User-agent") == download.MUSICBRAINZ_USER_AGENT
+        if url.path == "/database/search":
+            kind = query["type"][0]
+            event = f"/search-{kind}"
+            assert query == {
+                "type": [kind], "artist": [artist], "release_title": [title], "per_page": ["5"],
+            }
+        events.append(event)
+        if url.hostname == "i.discogs.com":
+            assert url.path == "/chosen.jpg"
+            return BytesIO(LARGE_JPEG)
+        if url.hostname == "coverartarchive.org":
+            raise HTTPError(request.full_url, 404, "Not Found", Message(), None)
+        match event:
+            case "/ws/2/release-group":
+                groups = [] if winner == "no-group" else [{
+                    "id": group, "title": title, "primary-type": "Single", "artist-credit": [{"name": artist}],
+                }]
+                payload = {"release-groups": groups}
+            case "/ws/2/release":
+                assert query["inc"] == ["url-rels"]
+                payload = {"releases": [{"id": pressing, "relations": [{
+                    "type": "discogs", "url": {"resource": "https://www.discogs.com/release/42"},
+                }]}]}
+            case path if path == f"/ws/2/release-group/{group}":
+                assert query["inc"] == ["url-rels"]
+                payload = {"relations": [
+                    {"type": "discogs", "url": {"resource": "https://www.discogs.com/master/11-Example"}},
+                    {"type": "discogs", "url": {"resource": "https://evil.example/release/12"}},
+                ]}
+            case "/masters/11" | "/releases/42":
+                succeeds = winner == ("master-link" if event == "/masters/11" else "release-link")
+                payload = {"images": [
+                    {"type": "secondary", "uri": "https://i.discogs.com/unexpected.jpg"},
+                    {"type": "primary", "uri": "http://i.discogs.com/chosen.jpg"},
+                ] if succeeds else []}
+            case "/search-master" | "/search-release":
+                succeeds = winner in ({"master", "no-group"} if event == "/search-master" else {"release"})
+                payload = {"results": [
+                    {"title": f"Wrong Artist - {title}", "year": year, "cover_image": "https://i.discogs.com/unexpected.jpg"},
+                    {"title": f"{artist} - {title}", "year": year, "cover_image": "https://i.discogs.com/spacer.gif?v=1"},
+                    {"title": f"{artist} - {title}", "year": year, "cover_image": "https://i.discogs.com/chosen.jpg"},
+                ] if succeeds else []}
+            case "/ws/2/recording":
+                payload = {"recordings": []}
+            case _:
+                pytest.fail(f"Unexpected URL: {request.full_url}")
+        return BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setenv("DISCOGS_TOKEN", "test-token")
+    monkeypatch.setattr(download, "urlopen", fake_urlopen)
+    monkeypatch.setattr(download, "MUSICBRAINZ_MIN_INTERVAL", 0)
+    monkeypatch.setattr(download, "DISCOGS_MIN_INTERVAL", 0)
+    caplog.set_level(logging.INFO)
+    assert download.main_loop(0, specific_dir=album, source="musicbrainz", explicit_check=False) == (winner != "parent")
+    expected = ["/ws/2/release-group"]
+    if winner == "no-group":
+        expected += ["/search-master"]
+    else:
+        expected += [
+            f"/release-group/{group}", "/ws/2/release", f"/release/{pressing}",
+            f"/ws/2/release-group/{group}",
+        ]
+        fallback_steps = [
+            ("master-link", "/masters/11"), ("release-link", "/releases/42"),
+            ("master", "/search-master"), ("release", "/search-release"), ("parent", "/ws/2/recording"),
+        ]
+        for stage, path in fallback_steps:
+            expected.append(path)
+            if stage == winner:
+                break
+    if winner != "parent":
+        expected += ["/chosen.jpg"]
+        assert (album / "cover.jpg").read_bytes() == LARGE_JPEG
+        assert "Using artwork from Discogs" in caplog.text
+    assert events == expected
+    assert "test-token" not in caplog.text
+
+
+def test_discogs_obeys_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = 0.0
+    attempts: list[float] = []
+
+    def sleep(delay: float) -> None:
+        nonlocal clock
+        clock += delay
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        attempts.append(clock)
+        if len(attempts) == 1:
+            headers = Message()
+            headers["Retry-After"] = "12"
+            raise HTTPError(request.full_url, 429, "Too Many Requests", headers, None)
+        return BytesIO(b'{"results":[]}')
+
+    monkeypatch.setattr(download, "time", MagicMock(monotonic=lambda: clock, sleep=sleep))
+    monkeypatch.setattr(download, "urlopen", fake_urlopen)
+    assert list(download.discogs_search("token")((), "Artist", "Title", 1982)) == []
+    assert attempts == pytest.approx([0.0, 12.0, 13.1])
 
 
 @pytest.mark.parametrize(("artist_yaml", "correct_metadata"), [(False, True), (True, True), (True, False)])

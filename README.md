@@ -684,8 +684,13 @@ is covered when its directory contains a file with basename `cover` and a
 groups by artist and title, preferring the requested year, and download
 artwork from Cover Art Archive. It checks the release group's JSON artwork
 listing first, preferring front art over `Single`, `Other`, or untagged art.
-If none works, it checks up to 50 individual releases in the group. For
-a matched single with no usable artwork, it searches for an exact recording
+If none works, it checks up to 50 individual releases in the group. If
+`DISCOGS_TOKEN` is set to a Discogs personal access token, it next checks
+Discogs links from MusicBrainz and then searches Discogs directly (masters,
+then releases), checking the artist and title and skipping placeholder images.
+Discogs API requests are paced separately; the token is not sent to the image CDN.
+Without a token, the Discogs step is skipped. For
+a matched single with no usable artwork after these steps, it searches for an exact recording
 and artist match on official non-compilation releases, prefers albums
 closest to the single's year, and logs when it uses a parent album's cover.
 For each candidate, it tries the listed 1200 px thumbnail and original,
