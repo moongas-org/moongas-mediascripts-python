@@ -619,9 +619,10 @@ line reports `quiet=True` or `quiet=False`. Copy/delete actions, dry-run
 previews, summary counts, warnings, and errors remain visible.
 
 All `copy_*.sh` wrappers require `COPY_MEDIALIB_EXCLUDE_KEYWORDS` and pass its
-newline-separated entries to `--exclude-keywords`. An empty entry matches every
-source path and excludes all included files; `copy-medialib` warns explicitly
-about this. An unset variable causes the wrappers to exit without copying.
+nonempty newline-separated entries to `--exclude-keywords`. An empty variable
+means no exclusions; an unset variable causes the wrappers to exit before copying
+or deleting files. If you call `copy-medialib` directly, an explicit empty
+keyword still matches every path and triggers a warning.
 `--overwrite-existing` still skips newer destination files;
 `--overwrite-newer` permits replacing those files instead.
 Before each copy or `--make-track-yml` write, missing destination parent
