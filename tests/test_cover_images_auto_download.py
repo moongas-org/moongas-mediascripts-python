@@ -1,18 +1,19 @@
 import json
 import logging
+import sys
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request
 
 import pytest
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 from PIL import Image
 
 from mediascripts.cover import cover_images_auto_download as download
@@ -434,6 +435,99 @@ def test_musicbrainz_saves_largest_matching_front_art_without_google_or_llm(
     assert album_yaml.read_text() == "albumData: {explicitCover: false}\n"
     browser.assert_not_called()
     llm.assert_not_called()
+
+
+@pytest.mark.parametrize(("artist_yaml", "correct_metadata"), [(False, True), (True, True), (True, False)])
+def test_musicbrainz_cli_uses_artist_yaml_or_corrected_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artist_yaml: bool, correct_metadata: bool,
+) -> None:
+    album = tmp_path / "Music" / "AC_DC" / "You Shook Me All Night Long _ Back in Black [1980]"
+    album.mkdir(parents=True)
+    album_yaml = album / "album.yml"
+    album_yaml.write_text("albumData: {explicitCover: false}\n")
+    if artist_yaml:
+        (album.parent / "artist.yml").write_text(
+            "artistData:\n  artistNames: [AC/DC, Alias]\n  city: Sydney\n"
+            "  countryCode: AU\n  regionCode: AU-NSW\n  languageCodes: [en]\n",
+        )
+    original_title = "You Shook Me All Night Long . Back in Black"
+    title = "You Shook Me All Night Long / Back in Black" if correct_metadata else original_title
+    client = model_client(json.dumps({"artist": "Wrong Artist" if artist_yaml else "AC/DC", "album": title}))
+    mbid = "00000000-0000-0000-0000-000000000001"
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        if request.full_url.startswith(download.MUSICBRAINZ_URL + "?"):
+            assert client.chat.completions.create.call_count == int(correct_metadata)
+            assert parse_qs(urlsplit(request.full_url).query)["query"] == [
+                f'artist:"AC/DC" AND releasegroup:"{title}"',
+            ]
+            return BytesIO(json.dumps({"release-groups": [{
+                "id": mbid, "title": title, "artist-credit": [{"name": "AC/DC"}],
+                "first-release-date": "1980",
+            }]}).encode())
+        assert request.full_url in {
+            f"{download.COVER_ART_ARCHIVE_URL}/{mbid}/front",
+            f"{download.COVER_ART_ARCHIVE_URL}/{mbid}/front-1200",
+        }
+        return BytesIO(LARGE_JPEG)
+
+    http = MagicMock(side_effect=fake_urlopen)
+    monkeypatch.setattr(download, "urlopen", http)
+    monkeypatch.setattr(download, "get_client", lambda: client)
+    monkeypatch.setattr(sys, "argv", [
+        "cover-images-auto-download", "--source", "musicbrainz",
+        "--no-explicit-check", "--dir", str(album),
+        *(["--correct-metadata"] if correct_metadata else []),
+    ])
+    assert download.main() == 0
+    if correct_metadata:
+        client.chat.completions.create.assert_called_once()
+        content = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        assert json.loads(content) == {
+            "artist": "AC/DC" if artist_yaml else "AC.DC", "album": original_title, "year": 1980,
+        }
+    else:
+        client.chat.completions.create.assert_not_called()
+    assert http.call_count == 3
+    assert (album / "cover.jpg").is_file()
+    assert album_yaml.read_text() == "albumData: {explicitCover: false}\n"
+
+
+@pytest.mark.parametrize("artist_yaml", [
+    "artistData: [",
+    "artistData: {artistNames: [AC/DC]}",
+    "artistData: {artistNames: [], city: Sydney, countryCode: AU, regionCode: AU-NSW, languageCodes: [en]}",
+])
+def test_unusable_artist_yaml_warns_and_uses_directory_name(
+    album: Path, caplog: pytest.LogCaptureFixture, artist_yaml: str,
+) -> None:
+    (album.parent / "artist.yml").write_text(artist_yaml)
+    search = MagicMock(return_value=[])
+    assert not download.process_album(album, search, user_agent=TEST_USER_AGENT)
+    search.assert_called_once_with("Artist.Name", "Album. Name", 1999)
+    assert "using the directory name" in caplog.text
+
+
+@pytest.mark.parametrize("answer", [
+    None, "not JSON", '{"artist":"   ","album":"Title"}',
+    '{"artist":"Original","album":"Title"}', '{"artist":"Corrected","album":"Title"}',
+])
+def test_musicbrainz_correction_uses_originals_on_failure_or_no_match(
+    answer: str | None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    client_provider = MagicMock(side_effect=OpenAIError("Missing credentials")) if answer is None else (
+        MagicMock(return_value=model_client(answer))
+    )
+    monkeypatch.setattr(download, "get_client", client_provider)
+    search = MagicMock(side_effect=lambda artist, album, year: ["original-url"] if artist == "Original" else [])
+
+    assert download.search_with_metadata_correction(search, "Original", "Title", 1980) == (
+        ["original-url"], "Original", "Title",
+    )
+    expected_calls = [call("Corrected", "Title", 1980)] if answer and '"Corrected"' in answer else []
+    assert search.call_args_list == [*expected_calls, call("Original", "Title", 1980)]
+    if answer is None or answer in {"not JSON", '{"artist":"   ","album":"Title"}'}:
+        assert "searching MusicBrainz with original names" in caplog.text
 
 
 @pytest.mark.parametrize(("status", "retry_after", "wait"), [(503, None, 2.0), (503, "12", 12.0), (429, "bad", 2.0)])

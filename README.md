@@ -693,6 +693,17 @@ album is counted as failed and the batch continues with the next album. The
 command still returns a nonzero exit status if any album failed. The batch
 stops if the server requests a wait longer than two minutes.
 
+The downloader uses the first name in `artistData.artistNames` from the
+artist directory's `artist.yml` (for example, `AC/DC`), falling back to the
+directory name if the file is missing or has no usable primary name.
+
+Opt in with `--source musicbrainz --correct-metadata` to send the
+artist name, folder-derived release title, and year to your configured LLM
+(`LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`). The script tries the
+corrected names first, keeping the artist name from `artist.yml` when present, then uses
+the original names if the model fails or MusicBrainz finds no matching
+release group. This changes only the search, not your saved metadata.
+
 The default `--source google` uses headless Chromium to search Google Images
 with the **Large** size filter and a query like
 `<artist> <album> (<year> album) album cover art image`. The script takes up
@@ -709,6 +720,7 @@ uv sync --extra cover-search --extra llm
 uv run --extra cover-search --extra llm python -m playwright install chromium
 
 uv run --extra llm cover-images-auto-download --source musicbrainz --no-explicit-check --dry-run --count 1
+uv run --extra llm cover-images-auto-download --source musicbrainz --correct-metadata --no-explicit-check --dry-run --count 1
 uv run --extra llm cover-images-auto-download --source musicbrainz --no-explicit-check
 cover-images-auto-download --dry-run          # search and download without saving
 cover-images-auto-download --dir "/music/Artist/Album [1999]"
@@ -723,7 +735,8 @@ usable image are reported as failures. If Google blocks automated requests,
 requires consent, or no longer shows a recognizable results grid, the batch
 stops rather than repeatedly querying Google; rerun with `--source musicbrainz`
 to skip Google and process the remaining albums. `--no-explicit-check` skips
-LLM requests and leaves `album.yml` unchanged.
+the explicit-cover LLM check and leaves `album.yml` unchanged. Unless you also
+enable `--correct-metadata`, this makes the download LLM-free.
 
 ## Scan Media Files into Track YAML
 
