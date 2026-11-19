@@ -34,6 +34,10 @@ LARGE_WEBP = make_image("WEBP", (1500, 1500))
 TEST_USER_AGENT = "Test Chromium User-Agent"
 
 
+def archive_metadata(*images: dict[str, object]) -> BytesIO:
+    return BytesIO(json.dumps({"images": images}).encode())
+
+
 @pytest.fixture
 def album(tmp_path: Path) -> Path:
     directory = tmp_path / "data" / "Music" / "Artist_Name" / "Album_ Name [1999]"
@@ -402,7 +406,8 @@ def test_musicbrainz_saves_largest_matching_front_art_without_google_or_llm(
         {"id": wrong_artist, "title": "Album. Name", "artist-credit": [{"name": "Different Artist"}], "first-release-date": "1999"},
         {"id": matched, "title": "Album Name", "artist-credit": [{"name": "Artist Name"}], "first-release-date": "1999-10-12"},
     ]}
-    front = f"https://coverartarchive.org/release-group/{matched}/front"
+    archive = f"https://coverartarchive.org/release-group/{matched}"
+    front, thumb = f"{archive}/1.jpg", f"{archive}/1-1200.jpg"
     requested: list[str] = []
     album_yaml = album / "album.yml"
     album_yaml.write_text("albumData: {explicitCover: false}\n")
@@ -415,7 +420,9 @@ def test_musicbrainz_saves_largest_matching_front_art_without_google_or_llm(
         if url.startswith(download.MUSICBRAINZ_URL + "?"):
             assert parse_qs(urlsplit(url).query)["query"] == ['artist:"Artist.Name" AND releasegroup:"Album. Name"']
             return BytesIO(json.dumps(payload).encode())
-        assert url in {front, f"{front}-1200"}
+        if url == archive:
+            return archive_metadata({"front": True, "image": front, "thumbnails": {"1200": thumb}})
+        assert url in {front, thumb}
         image = original if url == front else thumbnail
         if image is None:
             raise HTTPError(url, 404, "Not Found", Message(), None)
@@ -431,10 +438,97 @@ def test_musicbrainz_saves_largest_matching_front_art_without_google_or_llm(
     with Image.open(album / "cover.jpg") as image:
         assert image.size == expected_size
         assert image.format == "JPEG"
-    assert requested[1:] == [f"{front}-1200", front]
+    assert requested[1:] == [archive, thumb, front]
     assert album_yaml.read_text() == "albumData: {explicitCover: false}\n"
     browser.assert_not_called()
     llm.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["other", "pressing", "parent", "none"])
+def test_musicbrainz_falls_back_in_order_to_usable_artwork(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, stage: str,
+) -> None:
+    artist, title, year = "Huey Lewis and the News", "Do You Believe in Love", 1982
+    album = tmp_path / artist / f"{title} [{year}]"
+    album.mkdir(parents=True)
+    single = "cf0eed1d-d802-4569-bcea-c7ef8dbc08b8"
+    pressing = "00000000-0000-0000-0000-000000000001"
+    parent = "00000000-0000-0000-0000-000000000002"
+    compilation = "00000000-0000-0000-0000-000000000003"
+    group_path = f"/release-group/{single}"
+    pressing_path = f"/release/{pressing}"
+    parent_path = f"/release-group/{parent}"
+    paths: list[str] = []
+    credits = [{"name": "Huey Lewis & the News", "artist": {"name": artist}}]
+    archive = download.COVER_ART_ARCHIVE_URL
+
+    def fake_urlopen(request: Request, timeout: int) -> BytesIO:
+        url = urlsplit(request.full_url)
+        paths.append(url.path)
+        query = parse_qs(url.query)
+        match url.path:
+            case "/ws/2/release-group":
+                assert query["query"] == [f'artist:"{artist}" AND releasegroup:"{title}"']
+                payload = {"release-groups": [{
+                    "id": single, "title": title, "primary-type": "Single", "artist-credit": credits,
+                }]}
+            case "/ws/2/release":
+                assert query["release-group"] == [single]
+                payload = {"releases": [{"id": pressing}]}
+            case "/ws/2/recording":
+                assert query["query"] == [f'recording:"{title}" AND artist:"{artist}" AND primarytype:album']
+                releases = [
+                    {"status": "Official", "artist-credit": credits, "date": "1982", "release-group": {
+                        "id": compilation, "title": "Greatest Hits", "primary-type": "Album",
+                        "secondary-types": ["Compilation"],
+                    }},
+                    {"status": "Official", "artist-credit": credits, "date": "1982-01-29", "release-group": {
+                        "id": parent, "title": "Picture This", "primary-type": "Album", "secondary-types": [],
+                    }},
+                ]
+                payload = {"recordings": [{
+                    "title": title if stage == "parent" else f"{title} (live)",
+                    "artist-credit": credits, "releases": releases,
+                }]}
+            case _:
+                if url.path == group_path and stage == "other":
+                    return archive_metadata(
+                        {"types": ["Back"], "image": f"{archive}/back.jpg"},
+                        {"types": ["Other"], "image": f"{archive}/cover.jpg"},
+                        {"types": ["Front"], "image": f"{archive}/broken.jpg"},
+                    )
+                if url.path == pressing_path and stage in {"pressing", "parent"}:
+                    suffix = "cover" if stage == "pressing" else "broken"
+                    return archive_metadata({"types": [], "image": f"{archive}/{suffix}.jpg"})
+                if url.path == parent_path and stage == "parent":
+                    return archive_metadata({"types": ["Front"], "image": f"{archive}/cover.jpg"})
+                if url.path == "/broken.jpg":
+                    return BytesIO(b"not an image")
+                if url.path == "/cover.jpg":
+                    return BytesIO(LARGE_JPEG)
+                assert url.path in {group_path, pressing_path}, request.full_url
+                raise HTTPError(request.full_url, 404, "Not Found", Message(), None)
+        return BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(download, "urlopen", fake_urlopen)
+    monkeypatch.setattr(download, "MUSICBRAINZ_MIN_INTERVAL", 0)
+    caplog.set_level(logging.INFO)
+    assert download.main_loop(0, specific_dir=album, source="musicbrainz", explicit_check=False) == (stage != "none")
+    expected = ["/ws/2/release-group", group_path]
+    if stage == "other":
+        expected += ["/broken.jpg", "/cover.jpg"]
+    else:
+        expected += ["/ws/2/release", pressing_path]
+        if stage == "pressing":
+            expected += ["/cover.jpg"]
+        else:
+            expected += (["/broken.jpg"] if stage == "parent" else []) + ["/ws/2/recording"]
+            if stage == "parent":
+                expected += [parent_path, "/cover.jpg"]
+    assert paths == expected
+    if stage != "none":
+        assert (album / "cover.jpg").read_bytes() == LARGE_JPEG
+    assert ("Using parent album artwork from 'Picture This'" in caplog.text) == (stage == "parent")
 
 
 @pytest.mark.parametrize(("artist_yaml", "correct_metadata"), [(False, True), (True, True), (True, False)])
@@ -465,10 +559,10 @@ def test_musicbrainz_cli_uses_artist_yaml_or_corrected_names(
                 "id": mbid, "title": title, "artist-credit": [{"name": "AC/DC"}],
                 "first-release-date": "1980",
             }]}).encode())
-        assert request.full_url in {
-            f"{download.COVER_ART_ARCHIVE_URL}/{mbid}/front",
-            f"{download.COVER_ART_ARCHIVE_URL}/{mbid}/front-1200",
-        }
+        archive = f"{download.COVER_ART_ARCHIVE_URL}/release-group/{mbid}"
+        if request.full_url == archive:
+            return archive_metadata({"front": True, "image": f"{archive}/1.jpg", "thumbnails": {"1200": f"{archive}/1-1200.jpg"}})
+        assert request.full_url in {f"{archive}/1.jpg", f"{archive}/1-1200.jpg"}
         return BytesIO(LARGE_JPEG)
 
     http = MagicMock(side_effect=fake_urlopen)
@@ -488,7 +582,7 @@ def test_musicbrainz_cli_uses_artist_yaml_or_corrected_names(
         }
     else:
         client.chat.completions.create.assert_not_called()
-    assert http.call_count == 3
+    assert http.call_count == 4
     assert (album / "cover.jpg").is_file()
     assert album_yaml.read_text() == "albumData: {explicitCover: false}\n"
 
@@ -521,9 +615,9 @@ def test_musicbrainz_correction_uses_originals_on_failure_or_no_match(
     monkeypatch.setattr(download, "get_client", client_provider)
     search = MagicMock(side_effect=lambda artist, album, year: ["original-url"] if artist == "Original" else [])
 
-    assert download.search_with_metadata_correction(search, "Original", "Title", 1980) == (
-        ["original-url"], "Original", "Title",
-    )
+    assert list(download.search_with_metadata_correction(search, "Original", "Title", 1980)) == [
+        (download.ArtworkCandidate(["original-url"]), "Original", "Title"),
+    ]
     expected_calls = [call("Corrected", "Title", 1980)] if answer and '"Corrected"' in answer else []
     assert search.call_args_list == [*expected_calls, call("Original", "Title", 1980)]
     if answer is None or answer in {"not JSON", '{"artist":"   ","album":"Title"}'}:
@@ -560,8 +654,8 @@ def test_musicbrainz_paces_requests_and_retries(
     monkeypatch.setattr(download, "urlopen", fake_urlopen)
     search = download.musicbrainz_search()
 
-    assert search("A & B", 'Album "Title"', 2000) == []
-    assert search("C", "D", 2001) == []
+    assert list(search("A & B", 'Album "Title"', 2000)) == []
+    assert list(search("C", "D", 2001)) == []
     assert requests == [0.0, wait, wait + 1.1]
 
 
@@ -579,7 +673,7 @@ def test_musicbrainz_stops_after_retry_budget(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(download, "urlopen", request)
 
     with pytest.raises(download.MusicBrainzError, match=r"HTTP 503 after 5 attempts"):
-        download.musicbrainz_search()("A", "B", 2000)
+        list(download.musicbrainz_search()("A", "B", 2000))
 
     assert request.call_count == 5
     assert waits == [2.0, 4.0, 8.0, 16.0]
@@ -605,6 +699,10 @@ def test_musicbrainz_batch_continues_after_an_album_exhausts_retries(
     def fake_urlopen(request: Request, timeout: int) -> BytesIO:
         url = urlsplit(request.full_url)
         if url.hostname == "coverartarchive.org":
+            archive = f"{download.COVER_ART_ARCHIVE_URL}/release-group/{mbid}"
+            if request.full_url == archive:
+                return archive_metadata({"front": True, "image": f"{archive}/1.jpg"})
+            assert request.full_url == f"{archive}/1.jpg"
             return BytesIO(LARGE_JPEG)
         query = parse_qs(url.query)["query"][0]
         requests.append((query, clock))

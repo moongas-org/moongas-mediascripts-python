@@ -682,10 +682,15 @@ while processing continues.
 is covered when its directory contains a file with basename `cover` and a
 `.jpg` or `.webp` extension. Use `--source musicbrainz` to look up release
 groups by artist and title, preferring the requested year, and download
-front artwork from Cover Art Archive. It requests the 1200 px thumbnail
-(the largest thumbnail size) and the original, then saves whichever usable
-image has more pixels. This source requires no browser or
-search API key. MusicBrainz lookup requests are spaced at least 1.1 seconds apart.
+artwork from Cover Art Archive. It checks the release group's JSON artwork
+listing first, preferring front art over `Single`, `Other`, or untagged art.
+If none works, it checks up to 50 individual releases in the group. For
+a matched single with no usable artwork, it searches for an exact recording
+and artist match on official non-compilation releases, prefers albums
+closest to the single's year, and logs when it uses a parent album's cover.
+For each candidate, it tries the listed 1200 px thumbnail and original,
+saving whichever usable image has more pixels. This source requires no
+browser or search API key. MusicBrainz requests are spaced at least 1.1 seconds apart.
 At INFO level, each attempt logs the HTTP method, full encoded URL, and request headers.
 Rate limits and temporary server errors are retried up to four times with
 exponential backoff and respect `Retry-After`. If retries are exhausted, the

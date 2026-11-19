@@ -2,7 +2,9 @@
 
 An album is missing a cover when its directory has no file with basename
 "cover" and a supported extension (.jpg or .webp). Choose Google Images
-with the Large filter or MusicBrainz with Cover Art Archive. The LLM checks whether
+with the Large filter or MusicBrainz with Cover Art Archive. MusicBrainz checks
+release-group artwork, individual pressings, and then parent albums for singles.
+The LLM checks whether
 the album's front cover is known to be explicit and can optionally correct artist
 and release titles before a MusicBrainz search.
 JPEG output is preferred; candidates of at least 1000x1000 pixels are
@@ -23,10 +25,11 @@ import time
 import unicodedata
 from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 from uuid import UUID
@@ -61,8 +64,9 @@ PREFERRED_MIN_RESOLUTION = 1000
 YAML_ERRORS = (OSError, UnicodeError, YAMLError, ValueError, TypeError)
 GOOGLE_IMAGE_RESULTS = "[data-ri]:has(img)"
 GOOGLE_PREVIEW_IMAGES = "img.iPVvYb, img.sFlh5c.FyHeAf"
-MUSICBRAINZ_URL = "https://musicbrainz.org/ws/2/release-group"
-COVER_ART_ARCHIVE_URL = "https://coverartarchive.org/release-group"
+MUSICBRAINZ_API = "https://musicbrainz.org/ws/2"
+MUSICBRAINZ_URL = f"{MUSICBRAINZ_API}/release-group"
+COVER_ART_ARCHIVE_URL = "https://coverartarchive.org"
 MUSICBRAINZ_USER_AGENT = "moongas-cover-download/1.0 (https://github.com/moongas-org/moongas-mediascripts-python)"
 MUSICBRAINZ_MIN_INTERVAL = 1.1
 MUSICBRAINZ_MAX_ATTEMPTS = 5
@@ -83,7 +87,14 @@ if unsure. Return only a JSON object with two nonempty string fields: artist and
 Do not return URLs, IDs, or a year.
 """
 
-CoverSearch = Callable[[str, str, int], list[str]]
+@dataclass(frozen=True)
+class ArtworkCandidate:
+    urls: list[str]
+    parent_title: str | None = None
+    parent_year: int | None = None
+
+
+CoverSearch = Callable[[str, str, int], list[str] | Generator[ArtworkCandidate, None, None]]
 
 
 class GoogleImagesError(RuntimeError):
@@ -248,49 +259,160 @@ def musicbrainz_name(value: str) -> str:
     return "".join(char for char in decomposed if char.isalnum())
 
 
-def musicbrainz_release_group(payload: object, artist: str, album: str, year: int) -> UUID | None:
-    if not isinstance(payload, dict):
-        raise ValueError("MusicBrainz returned an invalid release-group response")
-    groups = cast(dict[str, object], payload).get("release-groups")
-    if not isinstance(groups, list):
-        raise ValueError("MusicBrainz response is missing its release-group list")
-    artist_key, album_key = musicbrainz_name(artist), musicbrainz_name(album)
-    matches: list[tuple[bool, UUID]] = []
-    for group in cast(list[object], groups):
-        if not isinstance(group, dict):
+def json_fields(value: object) -> dict[str, object]:
+    return cast(dict[str, object], value) if isinstance(value, dict) else {}
+
+
+def json_items(value: object) -> list[object]:
+    return cast(list[object], value) if isinstance(value, list) else []
+
+
+def response_items(payload: object, key: str) -> list[object]:
+    items = json_fields(payload).get(key)
+    if not isinstance(items, list):
+        raise ValueError(f"Expected a list in the {key!r} field of the API response")
+    return cast(list[object], items)
+
+
+def musicbrainz_artist_matches(credits: object, artist: str) -> bool:
+    credited: list[str] = []
+    canonical: list[str] = []
+    for credit in json_items(credits):
+        fields = json_fields(credit)
+        name, join = fields.get("name"), fields.get("joinphrase", "")
+        if not isinstance(name, str) or not isinstance(join, str):
+            return False
+        canonical_name = json_fields(fields.get("artist")).get("name")
+        credited.append(name + join)
+        canonical.append((canonical_name if isinstance(canonical_name, str) else name) + join)
+    return bool(credited) and musicbrainz_name(artist) in {
+        musicbrainz_name("".join(credited)), musicbrainz_name("".join(canonical)),
+    }
+
+
+def musicbrainz_id(fields: dict[str, object]) -> UUID | None:
+    value = fields.get("id")
+    if isinstance(value, str):
+        try:
+            return UUID(value)
+        except ValueError:
+            logger.warning("Ignoring invalid MusicBrainz ID: %r", value)
+    return None
+
+
+def musicbrainz_release_group(
+    payload: object, artist: str, album: str, year: int,
+) -> tuple[UUID, str | None] | None:
+    matches: list[tuple[bool, UUID, str | None]] = []
+    for group in response_items(payload, "release-groups"):
+        fields = json_fields(group)
+        title = fields.get("title")
+        if not isinstance(title, str) or musicbrainz_name(title) != musicbrainz_name(album):
             continue
-        fields = cast(dict[str, object], group)
-        title, credits, mbid = fields.get("title"), fields.get("artist-credit"), fields.get("id")
-        if not isinstance(title, str) or musicbrainz_name(title) != album_key:
+        if not musicbrainz_artist_matches(fields.get("artist-credit"), artist):
             continue
-        if not isinstance(credits, list) or not isinstance(mbid, str):
-            continue
-        credited_artist = ""
-        for credit in cast(list[object], credits):
-            if not isinstance(credit, dict):
-                break
-            credit_fields = cast(dict[str, object], credit)
-            name, join = credit_fields.get("name"), credit_fields.get("joinphrase", "")
-            if not isinstance(name, str) or not isinstance(join, str):
-                break
-            credited_artist += name + join
-        else:
-            if musicbrainz_name(credited_artist) != artist_key:
-                continue
+        if (mbid := musicbrainz_id(fields)) is not None:
             date = fields.get("first-release-date")
-            matches.append((isinstance(date, str) and date.split("-", 1)[0] == str(year), UUID(mbid)))
-    # Prefer the requested year, keeping MusicBrainz's order for reissues.
-    return max(matches, key=lambda match: match[0])[1] if matches else None
+            primary_type = fields.get("primary-type")
+            matches.append((
+                isinstance(date, str) and date.split("-", 1)[0] == str(year),
+                mbid,
+                primary_type if isinstance(primary_type, str) else None,
+            ))
+    if not matches:
+        return None
+    _, mbid, primary_type = max(matches, key=lambda match: match[0])
+    return mbid, primary_type
+
+
+def archive_image_url(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        logger.warning("Ignoring malformed Cover Art Archive image URL: %r", value)
+        return None
+    host = parsed.hostname or ""
+    if parsed.scheme not in {"http", "https"} or not (
+        host in {"coverartarchive.org", "archive.org"} or host.endswith(".archive.org")
+    ):
+        return None
+    return parsed._replace(scheme="https").geturl()
+
+
+def archive_art(entity: str, mbid: UUID) -> Generator[list[str], None, None]:
+    url = f"{COVER_ART_ARCHIVE_URL}/{entity}/{mbid}"
+    request = Request(url, headers={"User-Agent": MUSICBRAINZ_USER_AGENT, "Accept": "application/json"})
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload: object = json.load(response)
+        images = response_items(payload, "images")
+    except HTTPError as error:
+        error.close()
+        if error.code != 404:
+            logger.warning("Could not read Cover Art Archive metadata at %s: HTTP %d", url, error.code)
+        else:
+            logger.debug("No Cover Art Archive metadata at %s", url)
+        return
+    except (OSError, ValueError) as error:
+        logger.warning("Could not read Cover Art Archive metadata at %s: %s", url, error)
+        return
+    candidates: list[tuple[bool, bool, list[str]]] = []
+    for image in images:
+        fields = json_fields(image)
+        types = json_items(fields.get("types"))
+        front = fields.get("front") is True or "Front" in types
+        if not front and (
+            fields.get("back") is True or any(kind not in ("Other", "Single") for kind in types)
+        ):
+            continue
+        original = archive_image_url(fields.get("image"))
+        thumbnail = archive_image_url(json_fields(fields.get("thumbnails")).get("1200"))
+        urls = list(dict.fromkeys(url for url in (thumbnail, original) if url))
+        if urls:
+            candidates.append((front, fields.get("approved") is True, urls))
+    for _, _, urls in sorted(candidates, key=lambda item: item[:2], reverse=True):
+        yield urls
+
+
+def musicbrainz_parent_albums(
+    payload: object, artist: str, track: str, year: int,
+) -> list[tuple[UUID, str, int | None]]:
+    matches: dict[UUID, tuple[str, int | None]] = {}
+    for recording in response_items(payload, "recordings"):
+        record = json_fields(recording)
+        title = record.get("title")
+        if not isinstance(title, str) or musicbrainz_name(title) != musicbrainz_name(track):
+            continue
+        if not musicbrainz_artist_matches(record.get("artist-credit"), artist):
+            continue
+        for raw_release in json_items(record.get("releases")):
+            release = json_fields(raw_release)
+            if release.get("status") != "Official" or not musicbrainz_artist_matches(release.get("artist-credit"), artist):
+                continue
+            group = json_fields(release.get("release-group"))
+            album_title = group.get("title")
+            if group.get("primary-type") != "Album" or group.get("secondary-types") != []:
+                continue
+            if not isinstance(album_title, str) or not album_title or (mbid := musicbrainz_id(group)) is None:
+                continue
+            date = group.get("first-release-date") or release.get("date")
+            album_year = int(date[:4]) if isinstance(date, str) and re.match(r"[0-9]{4}", date) else None
+            if mbid not in matches or (album_year is not None and (matches[mbid][1] or 9999) > album_year):
+                matches[mbid] = album_title, album_year
+    ordered = sorted(
+        matches.items(), key=lambda item: (abs((item[1][1] or 9999) - year), item[1][1] or 9999),
+    )
+    return [(mbid, title, album_year) for mbid, (title, album_year) in ordered]
 
 
 def musicbrainz_search() -> CoverSearch:
     next_request = 0.0
 
-    def search(artist: str, album: str, year: int) -> list[str]:
+    def request_json(entity: str, params: dict[str, str | int]) -> object:
         nonlocal next_request
-        # Double quotes and backslashes must be escaped inside Lucene phrases.
-        query = f"artist:{json.dumps(artist, ensure_ascii=False)} AND releasegroup:{json.dumps(album, ensure_ascii=False)}"
-        url = MUSICBRAINZ_URL + "?" + urlencode({"query": query, "fmt": "json", "limit": 25})
+        url = f"{MUSICBRAINZ_API}/{entity}?" + urlencode({**params, "fmt": "json"})
         request = Request(url, headers={"User-Agent": MUSICBRAINZ_USER_AGENT, "Accept": "application/json"})
         for attempt in range(1, MUSICBRAINZ_MAX_ATTEMPTS + 1):
             delay = next_request - time.monotonic()
@@ -304,8 +426,7 @@ def musicbrainz_search() -> CoverSearch:
             next_request = time.monotonic() + MUSICBRAINZ_MIN_INTERVAL
             try:
                 with urlopen(request, timeout=30) as response:
-                    payload: object = json.load(response)
-                break
+                    return cast(object, json.load(response))
             except HTTPError as error:
                 retry_after = error.headers.get("Retry-After")
                 error.close()
@@ -331,11 +452,31 @@ def musicbrainz_search() -> CoverSearch:
                 next_request = time.monotonic() + retry_delay
         else:
             raise AssertionError("MusicBrainz request loop exhausted")
-        mbid = musicbrainz_release_group(payload, artist, album, year)
-        if mbid is None:
-            return []
-        front = f"{COVER_ART_ARCHIVE_URL}/{mbid}/front"
-        return [f"{front}-1200", front]
+
+    def group_art(mbid: UUID) -> Generator[list[str], None, None]:
+        yield from archive_art("release-group", mbid)
+        payload = request_json("release", {"release-group": str(mbid), "limit": 50})
+        for release in response_items(payload, "releases"):
+            if (release_id := musicbrainz_id(json_fields(release))) is not None:
+                yield from archive_art("release", release_id)
+
+    def search(artist: str, album: str, year: int) -> Generator[ArtworkCandidate, None, None]:
+        artist_query = f"artist:{json.dumps(artist, ensure_ascii=False)}"
+        title = json.dumps(album, ensure_ascii=False)
+        payload = request_json("release-group", {"query": f"{artist_query} AND releasegroup:{title}", "limit": 25})
+        match = musicbrainz_release_group(payload, artist, album, year)
+        if match is None:
+            return
+        mbid, primary_type = match
+        for urls in group_art(mbid):
+            yield ArtworkCandidate(urls)
+        if primary_type == "Single":
+            payload = request_json(
+                "recording", {"query": f"recording:{title} AND {artist_query} AND primarytype:album", "limit": 25},
+            )
+            for album_id, album_title, album_year in musicbrainz_parent_albums(payload, artist, album, year):
+                for urls in group_art(album_id):
+                    yield ArtworkCandidate(urls, album_title, album_year)
 
     return search
 
@@ -376,9 +517,18 @@ def correct_musicbrainz_metadata(client: OpenAI, artist: str, album: str, year: 
     return corrected_artist.strip(), corrected_album.strip()
 
 
+def cover_candidates(search: CoverSearch, artist: str, album: str, year: int) -> Generator[ArtworkCandidate, None, None]:
+    result = search(artist, album, year)
+    if isinstance(result, list):
+        if result:
+            yield ArtworkCandidate(result)
+    else:
+        yield from result
+
+
 def search_with_metadata_correction(
     search: CoverSearch, artist: str, album: str, year: int, *, keep_artist: bool = False,
-) -> tuple[list[str], str, str]:
+) -> Generator[tuple[ArtworkCandidate, str, str], None, None]:
     try:
         corrected = correct_musicbrainz_metadata(get_client(), artist, album, year)
     except APIStatusError as error:
@@ -398,11 +548,11 @@ def search_with_metadata_correction(
             corrected = artist, corrected[1]
         if corrected != (artist, album):
             logger.info("MusicBrainz metadata correction: %r - %r -> %r - %r", artist, album, *corrected)
-            urls = search(*corrected, year)
-            if urls:
-                return urls, *corrected
-            logger.info("No MusicBrainz match for corrected names; trying original names")
-    return search(artist, album, year), artist, album
+            for candidate in cover_candidates(search, *corrected, year):
+                yield candidate, *corrected
+            logger.info("No usable artwork for corrected names; trying original names")
+    for candidate in cover_candidates(search, artist, album, year):
+        yield candidate, artist, album
 
 
 def download_image(url: str, user_agent: str) -> bytes:
@@ -423,6 +573,7 @@ def choose_image(candidates: list[bytes], *, prefer_resolution: bool = False) ->
     for data in candidates:
         try:
             with Image.open(BytesIO(data)) as image:
+                image.load()
                 is_jpeg = image.format == "JPEG"
                 width, height = image.size
         except (UnidentifiedImageError, OSError) as error:
@@ -512,28 +663,39 @@ def process_album(
         if artist_from_yaml is not None:
             artist = artist_from_yaml
         if correct_metadata:
-            urls, artist, album = search_with_metadata_correction(
+            candidates = search_with_metadata_correction(
                 search, artist, album, year, keep_artist=artist_from_yaml is not None,
             )
         else:
-            urls = search(artist, album, year)
-        if not urls:
-            logger.warning("[%s] No matching cover image URLs found for %r - %r", album_dir, artist, album)
-            return False
-        candidates: list[bytes] = []
-        for url in urls:
+            candidates = ((candidate, artist, album) for candidate in cover_candidates(search, artist, album, year))
+        found_urls = False
+        for candidate, matched_artist, matched_title in candidates:
+            found_urls = True
+            images: list[bytes] = []
+            for url in candidate.urls:
+                try:
+                    images.append(download_image(url, user_agent))
+                except (OSError, ValueError) as error:
+                    logger.warning("[%s] Could not download %s: %s", album_dir, url, error)
+            if not images:
+                continue
             try:
-                candidates.append(download_image(url, user_agent))
-            except (OSError, ValueError, URLError, HTTPError) as error:
-                logger.warning("[%s] Could not download %s: %s", album_dir, url, error)
-        if not candidates:
-            logger.warning("[%s] No downloadable cover candidates for %r - %r", album_dir, artist, album)
-            return False
-        data, is_jpeg = choose_image(candidates, prefer_resolution=prefer_resolution)
-        save_cover(album_dir, data, is_jpeg, dry_run)
-        if explicit_check and (album_dir / "album.yml").is_file() and is_explicit_cover(get_client(), artist, album, year):
-            set_explicit_cover(album_dir, dry_run)
-        return True
+                data, is_jpeg = choose_image(images, prefer_resolution=prefer_resolution)
+            except ValueError as error:
+                logger.warning("[%s] %s", album_dir, error)
+                continue
+            if candidate.parent_title is not None:
+                logger.info("[%s] Using parent album artwork from %r", album_dir, candidate.parent_title)
+            save_cover(album_dir, data, is_jpeg, dry_run)
+            if explicit_check and (album_dir / "album.yml").is_file() and is_explicit_cover(
+                get_client(), matched_artist, candidate.parent_title or matched_title, candidate.parent_year or year,
+            ):
+                set_explicit_cover(album_dir, dry_run)
+            return True
+        logger.warning(
+            "[%s] %s for %r - %r", album_dir,
+            "No usable cover candidates" if found_urls else "No matching cover image URLs found", artist, album,
+        )
     except MusicBrainzRetriesExhausted as error:
         logger.error("[%s] Skipping album: %s", album_dir, error)
     except APIStatusError as error:
