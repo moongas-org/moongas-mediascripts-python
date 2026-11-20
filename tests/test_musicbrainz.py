@@ -10,8 +10,8 @@ from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
 
 import pytest
-from ruamel.yaml import YAML
 
+from mediascripts.common.yaml import create_yaml
 from mediascripts.acoustid import acoustid, musicbrainz
 
 REC_1 = "0c652621-96d6-46bb-a886-b277b87bafd4"
@@ -48,7 +48,7 @@ def test_invalid_id_still_allows_isrc_format_repair(track: Path, http_mock: Magi
 
 
 def test_populated_unquoted_isrcs_are_left_unchanged(track: Path, http_mock: MagicMock) -> None:
-    yaml = YAML()
+    yaml = create_yaml()
     data = yaml.load(track.read_text())
     for result in data["mediaFileData"][0]["acoustidData"]["results"]:
         for recording in result["recordings"]:
@@ -132,7 +132,7 @@ def respond(request: Request, timeout: float) -> HttpResponse:
 
 
 def recordings(path: Path) -> list[dict[str, object]]:
-    data = YAML(typ="safe").load(path.read_text())["mediaFileData"][0]["acoustidData"]
+    data = create_yaml(typ="safe").load(path.read_text())["mediaFileData"][0]["acoustidData"]
     return [recording for result in data["results"] for recording in result["recordings"]]
 
 
@@ -502,7 +502,7 @@ def test_overwrite_unchanged_musicbrainz_results(
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    data = YAML(typ="safe").load(TRACK)
+    data = create_yaml(typ="safe").load(TRACK)
     for result in data["mediaFileData"][0]["acoustidData"]["results"]:
         for recording in result["recordings"]:
             recording.update(SAVED_1 if recording["id"] == REC_1 else SAVED_2)
@@ -522,7 +522,7 @@ def test_overwrite_unchanged_musicbrainz_results(
             assert backup.read_text() == original
         text = output.read_text()
         assert '"GBARL9200074"' not in text
-        assert YAML(typ="safe").load(text) == data
+        assert create_yaml(typ="safe").load(text) == data
         assert "&id" not in text and "*id" not in text
         assert capsys.readouterr().out.startswith("meld ")
         assert "--overwrite requested despite unchanged recording details" in caplog.text
@@ -559,7 +559,7 @@ def test_interrupted_track_logs_pending_updates_without_saving(
 
 @pytest.mark.parametrize("mode", ["skipped", "offline", "failed", "not_found"])
 def test_overwrite_requires_successful_musicbrainz_lookup(track: Path, http_mock: MagicMock, mode: str) -> None:
-    data = YAML(typ="safe").load(TRACK)
+    data = create_yaml(typ="safe").load(TRACK)
     for result in data["mediaFileData"][0]["acoustidData"]["results"]:
         for recording in result["recordings"]:
             recording.update(SAVED_1)
@@ -631,7 +631,7 @@ def test_503_increases_sleep_for_later_requests(
     assert delays == pytest.approx([base + 0.5, base + 1.0, base + 0.9, base + 0.8, base + 0.7])
     assert "(temporary extra sleep 1.000)" in caplog.text
     assert (
-        YAML(typ="safe").load((tmp_path / "03.yml").read_text())["mediaFileData"][0]["acoustidData"]["results"][0]["recordings"][
+        create_yaml(typ="safe").load((tmp_path / "03.yml").read_text())["mediaFileData"][0]["acoustidData"]["results"][0]["recordings"][
             0
         ]["title"]
         == "T"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Usage: rename-album-files [--dir ALBUM_DIR] [--dry-run]
+Usage: rename-album-files [--dir ALBUM_DIR] [--dry-run] [-q | --quiet]
 
 By default, walks every album directory in $MOONGAS_COLLECTION_ROOTDIR/data.
 Use --dir to process a single specific album directory instead.
@@ -15,6 +15,7 @@ Rules:
 import argparse
 import os
 import re
+import sys
 from pathlib import Path
 
 from mediascan.types.album.album_path import AlbumPath, AlbumPathBuilder
@@ -82,7 +83,7 @@ def update_filename(filename: str, artist_dirname: str) -> str:
     return f"{updated_stem or stem}{ext}"
 
 
-def prepare_rename_tasks(album_path: AlbumPath) -> list[tuple[str, str]]:
+def prepare_rename_tasks(album_path: AlbumPath, *, quiet: bool = False) -> list[tuple[str, str]]:
     rename_tasks: list[tuple[str, str]] = []
     filenames = sorted(f.name for f in album_path.path.iterdir() if f.is_file())
     targets = set(filenames)
@@ -91,7 +92,8 @@ def prepare_rename_tasks(album_path: AlbumPath) -> list[tuple[str, str]]:
         if updated_filename == filename:
             continue
         if updated_filename in targets:
-            print(f'Skipping "{filename}": "{updated_filename}" already exists')
+            if not quiet:
+                print(f'Skipping "{filename}": "{updated_filename}" already exists')
             continue
         targets.add(updated_filename)
         rename_tasks.append((filename, updated_filename))
@@ -102,6 +104,8 @@ def perform_rename_tasks(
     album_path: AlbumPath,
     rename_tasks: list[tuple[str, str]],
     dry_run: bool = False,
+    *,
+    quiet: bool = False,
 ) -> None:
     for original, updated in rename_tasks:
         if not dry_run:
@@ -109,47 +113,57 @@ def perform_rename_tasks(
                 os.path.join(album_path.path, original),
                 os.path.join(album_path.path, updated),
             )
-        print(f'Renamed "{original}" -> "{updated}"')
+        if not dry_run or not quiet:
+            print(f'Renamed "{original}" -> "{updated}"')
 
 
-def rename_album_files(album_path_raw: str | Path, dry_run: bool = False) -> int:
-    if dry_run:
+def rename_album_files(album_path_raw: str | Path, dry_run: bool = False, *, quiet: bool = False) -> int:
+    if dry_run and not quiet:
         print("----BEGIN DRY RUN----")
     album_path = AlbumPathBuilder.of(album_path_raw)
-    print("Parsed album path:")
-    print(album_path)
+    if not quiet:
+        print("Parsed album path:")
+        print(album_path)
     renamed_count = 0
     if not album_path.valid:
-        print("Album path is invalid, rename operation aborted")
+        print(f"Album path is invalid, rename operation aborted: {album_path_raw}", file=sys.stderr)
     else:
-        print("Album path is valid, proceeding with rename operation")
-        rename_tasks = prepare_rename_tasks(album_path)
-        if len(rename_tasks):
-            perform_rename_tasks(album_path, rename_tasks, dry_run)
+        if not quiet:
+            print("Album path is valid, proceeding with rename operation")
+        rename_tasks = prepare_rename_tasks(album_path, quiet=quiet)
+        if rename_tasks:
+            perform_rename_tasks(album_path, rename_tasks, dry_run, quiet=quiet)
         renamed_count = len(rename_tasks)
-        print(f"{renamed_count} files renamed")
-    if dry_run:
+        if not quiet:
+            print(f"{renamed_count} files renamed")
+    if dry_run and not quiet:
         print("----END DRY RUN----")
     return renamed_count
 
 
-def rename_all_album_files(collection_data_path: Path, dry_run: bool = False) -> None:
+def rename_all_album_files(collection_data_path: Path, dry_run: bool = False, *, quiet: bool = False) -> None:
     if not collection_data_path.is_dir():
-        print(f"Collection data directory does not exist: {collection_data_path}")
+        print(f"Collection data directory does not exist: {collection_data_path}", file=sys.stderr)
         return
+
+    def report_walk_error(error: OSError) -> None:
+        print(f"Could not scan collection directory: {error}", file=sys.stderr)
+
     album_dirs = sorted(
         Path(root)
-        for root, _, _ in os.walk(collection_data_path, followlinks=True)
+        for root, _, _ in os.walk(collection_data_path, followlinks=True, onerror=report_walk_error)
         if AlbumPathBuilder.of(root).valid
     )
-    print(f"Found {len(album_dirs)} album directories in {collection_data_path}")
+    if not quiet:
+        print(f"Found {len(album_dirs)} album directories in {collection_data_path}")
     total_renamed = sum(
-        rename_album_files(album_dir, dry_run) for album_dir in album_dirs
+        rename_album_files(album_dir, dry_run, quiet=quiet) for album_dir in album_dirs
     )
-    print(f"{total_renamed} files renamed across {len(album_dirs)} album directories")
+    if not quiet:
+        print(f"{total_renamed} files renamed across {len(album_dirs)} album directories")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Rename album files in all album directories, or a single one with --dir."
     )
@@ -164,13 +178,18 @@ def main():
         action="store_true",
         help="Simulate actions without making actual file changes",
     )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Report only actual renames and errors; suppress dry-run previews.",
+    )
 
     args = parser.parse_args()
     if args.dir is not None:
-        rename_album_files(args.dir, dry_run=args.dry_run)
+        rename_album_files(args.dir, dry_run=args.dry_run, quiet=args.quiet)
     else:
         rename_all_album_files(
-            Path(MOONGAS_COLLECTION_ROOTDIR) / "data", dry_run=args.dry_run
+            Path(MOONGAS_COLLECTION_ROOTDIR) / "data", dry_run=args.dry_run, quiet=args.quiet
         )
 
 

@@ -50,10 +50,10 @@ from typing import Optional, Protocol, TextIO, cast
 import mutagen
 from mediascan.types.album.album_path import AlbumPathBuilder
 from openai import APIStatusError, OpenAI
-from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 from tqdm import tqdm
 
+from mediascripts.common.yaml import create_yaml
 from mediascan.types.artist.artist_yaml_file_validator import (
     validate_artist_yaml_file,
 )
@@ -120,7 +120,7 @@ def infer_artist_name(artist_dir: Path) -> str:
                     }:
                         continue
                     with path.open(encoding="utf-8") as stream:
-                        document = cast(_YamlIO, YAML(typ="safe")).load(stream)
+                        document = cast(_YamlIO, create_yaml(typ="safe")).load(stream)
                     if not isinstance(document, dict):
                         raise ValueError("Expected a YAML mapping")
                     document_mapping = cast(Mapping[str, object], document)
@@ -186,7 +186,7 @@ def ensure_artist_yaml(artist_dir: Path, overrides: Mapping[str, object]) -> tup
             prefix=".artist.yml.", suffix=".tmp", delete=False,
         ) as stream:
             temporary_path = Path(stream.name)
-            cast(_YamlIO, YAML()).dump({"artistData": data}, stream)
+            cast(_YamlIO, create_yaml()).dump({"artistData": data}, stream)
         os.link(temporary_path, path)
     finally:
         if temporary_path is not None:

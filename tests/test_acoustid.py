@@ -9,8 +9,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote_plus, urlsplit
 
 import pytest
-from ruamel.yaml import YAML
 
+from mediascripts.common.yaml import create_yaml
 from mediascripts.acoustid import acoustid
 
 KEY = "private+key/with spaces"
@@ -100,12 +100,12 @@ def test_lookup_saves_full_response_or_leaves_dry_run_untouched(
         proposal = Path(command[2])
         assert proposal.parent.name.startswith("acoustid-proposal-")
         assert proposal.name == track.name
-        document = YAML(typ="safe").load(proposal.read_text())
+        document = create_yaml(typ="safe").load(proposal.read_text())
         assert document["mediaFileData"][0]["acoustidData"] == RESULT
         assert KEY not in proposal.read_text()
     else:
         assert command[1:] == [str(backup.resolve()), str(track.resolve())]
-        document = YAML(typ="safe").load(track.read_text())
+        document = create_yaml(typ="safe").load(track.read_text())
         entry = document["mediaFileData"][0]
         assert entry["acoustidData"] == RESULT
         assert "acoustidIds" not in entry
@@ -188,7 +188,7 @@ def test_multiple_fingerprints_count_as_one_track_and_are_rate_limited(
     delay = acoustid.time.sleep.call_args.args[0]
     assert delay == pytest.approx(acoustid.MIN_SLEEP - 0.1)
     assert delay > 1 / 3 - 0.1
-    entries = YAML(typ="safe").load(track.read_text())["mediaFileData"]
+    entries = create_yaml(typ="safe").load(track.read_text())["mediaFileData"]
     assert all(entry["acoustidData"] == RESULT for entry in entries)
 
 
@@ -318,7 +318,7 @@ def test_no_matches_or_unlinked_match(
     original = track.read_bytes()
     http_mock.return_value = HttpResponse(json.dumps(result).encode())
     assert acoustid.run(KEY, specific_file=track)
-    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == result
+    assert create_yaml(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == result
     assert track.with_name(track.name + ".bak").read_bytes() == original
 
 
@@ -389,9 +389,9 @@ def test_only_acoustid_data_is_modified(track: Path, http_mock: MagicMock) -> No
         + "    acoustidData: {status: ok, results: []}\n"
         + "  - path: /music/untouched.flac\n"
     )
-    original = YAML(typ="safe").load(track.read_text())
+    original = create_yaml(typ="safe").load(track.read_text())
     assert acoustid.run(KEY, specific_file=track, force=True)
-    updated = YAML(typ="safe").load(track.read_text())
+    updated = create_yaml(typ="safe").load(track.read_text())
     assert updated["mediaFileData"][0].pop("acoustidData") == RESULT
     original["mediaFileData"][0].pop("acoustidData")
     assert updated == original
@@ -401,7 +401,7 @@ def test_full_response_retains_additional_fields(track: Path, http_mock: MagicMo
     response = {**RESULT, "extra": {"nested": [True, None, 42, "value"]}}
     http_mock.return_value = HttpResponse(json.dumps(response).encode())
     assert acoustid.run(KEY, specific_file=track)
-    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == response
+    assert create_yaml(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == response
 
 
 def test_changed_source_is_not_overwritten(track: Path, http_mock: MagicMock) -> None:
@@ -474,14 +474,14 @@ def test_empty_acoustid_data_is_looked_up(track: Path, http_mock: MagicMock, exi
     track.write_text(track.read_text() + "    acoustidData: " + existing + "\n")
     assert acoustid.run(KEY, specific_file=track)
     http_mock.assert_called_once()
-    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == RESULT
+    assert create_yaml(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == RESULT
 
 
 def test_force_looks_up_existing_acoustid_data(track: Path, http_mock: MagicMock) -> None:
     track.write_text(track.read_text() + "    acoustidData: {status: ok, results: []}\n")
     assert acoustid.run(KEY, specific_file=track, force=True)
     http_mock.assert_called_once()
-    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == RESULT
+    assert create_yaml(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == RESULT
 
 
 def test_skipped_tracks_do_not_consume_count(track: Path, http_mock: MagicMock) -> None:
@@ -489,7 +489,7 @@ def test_skipped_tracks_do_not_consume_count(track: Path, http_mock: MagicMock) 
     done.write_text(track.read_text() + "    acoustidData: {status: ok, results: []}\n")
     assert acoustid.run(KEY, specific_dir=track.parent, count=1)
     http_mock.assert_called_once()
-    assert YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == RESULT
+    assert create_yaml(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"] == RESULT
 
 
 @pytest.mark.parametrize("overwrite", [False, True])
@@ -507,7 +507,7 @@ def test_overwrite_rewrites_equal_response_and_removes_unnecessary_quotes(
 ) -> None:
     track.write_text(track.read_text() + "    acoustidData: " + json.dumps(RESULT) + "\n")
     original = track.read_text()
-    before = YAML(typ="safe").load(original)
+    before = create_yaml(typ="safe").load(original)
     assert '"USSM18500120"' in original
     assert acoustid.run(KEY, specific_file=track, force=True, overwrite=True, dry_run=dry_run)
     http_mock.assert_called_once()
@@ -522,7 +522,7 @@ def test_overwrite_rewrites_equal_response_and_removes_unnecessary_quotes(
     text = output.read_text()
     assert '"USSM18500120"' not in text
     assert "USSM18500120" in text
-    assert YAML(typ="safe").load(text) == before
+    assert create_yaml(typ="safe").load(text) == before
     assert capsys.readouterr().out.startswith("meld ")
 
 
@@ -608,7 +608,7 @@ def test_missing_or_null_isrcs_are_saved_unchanged(track: Path, http_mock: Magic
     response = {"status": "ok", "results": [{"id": "match-1", "score": 0.9, "recordings": [recording]}]}
     http_mock.return_value = HttpResponse(json.dumps(response).encode())
     assert acoustid.run(KEY, specific_file=track)
-    saved = YAML(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"]
+    saved = create_yaml(typ="safe").load(track.read_text())["mediaFileData"][0]["acoustidData"]
     if recording.get("isrcs", []) is None:
         response["results"][0]["recordings"][0]["isrcs"] = []
     assert saved == response

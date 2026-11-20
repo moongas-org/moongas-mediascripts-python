@@ -17,6 +17,7 @@ from ruamel.yaml.error import YAMLError
 
 from mediascripts.track.track_yaml.track_yaml_common import (
     TextWriter,
+    collection_relative_path,
     iter_collection_files,
     save_yaml_atomically,
     show_yaml_file_diff,
@@ -57,19 +58,6 @@ def _read_year(tags: Mapping[str, list[str]], fallback: int) -> int:
     except ValueError:
         logger.warning("Ignoring invalid media-file date: %r", value)
         return fallback
-
-
-def _collection_relative_path(media_path: Path) -> str:
-    collection_root = os.environ.get("MOONGAS_COLLECTION_ROOTDIR")
-    if not collection_root:
-        raise ValueError("MOONGAS_COLLECTION_ROOTDIR must be set to write collection-relative media paths")
-    absolute_root = Path(os.path.abspath(collection_root))
-    absolute_media_path = Path(os.path.abspath(media_path))
-    try:
-        relative_path = absolute_media_path.relative_to(absolute_root)
-    except ValueError as error:
-        raise ValueError(f"Media file is outside the collection root: {media_path}") from error
-    return f"/{relative_path.as_posix()}"
 
 
 def find_media_file(track_yaml_path: Path) -> Path:
@@ -152,7 +140,7 @@ def process_track_yaml(
         tags = audio.tags or {}
         file_stat = media_path.stat()
         media_values: dict[str, object] = {
-            "path": _collection_relative_path(media_path),
+            "path": collection_relative_path(media_path),
             "size": file_stat.st_size,
             "format": media_path.suffix.lstrip(".").lower(),
             "title": _read_tag(tags, "title", cast(str, track_values["title"])),

@@ -64,5 +64,15 @@
     ],
     "python.analysis.typeCheckingMode": "strict",
     "python.analysis.importFormat": "absolute",
-    "python.terminal.useEnvFile": false
+    "python.terminal.useEnvFile": false,
+    "cSpell.words": [
+        "albumartist",
+        "filething",
+        "mediafile",
+        "mediascan",
+        "mediascripts",
+        "MOONGAS",
+        "readkey",
+        "ROOTDIR"
+    ]
 }

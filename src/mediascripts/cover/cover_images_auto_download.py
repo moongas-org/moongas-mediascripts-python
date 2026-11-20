@@ -41,7 +41,6 @@ from mediascan.types.artist.artist_yaml_file_loader import load_artist_yaml_file
 from openai import APIError, APIStatusError, OpenAI, OpenAIError
 from openai.types.chat import ChatCompletionMessageParam
 from PIL import Image, UnidentifiedImageError
-from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 from tqdm import tqdm
 from yaml import YAMLError as PyYAMLError
@@ -49,6 +48,7 @@ from yaml import YAMLError as PyYAMLError
 from mediascripts.common.cli.parse_boolean import parse_boolean
 from mediascripts.common.http import retry_after_seconds
 from mediascripts.common.openai.client import MODEL_NAME, get_client
+from mediascripts.common.yaml import create_yaml
 from mediascripts.mediafile.auto_tag_media_file import unescape_name
 from mediascripts.track.track_yaml.track_yaml_common import TextWriter, save_yaml_atomically
 
@@ -776,7 +776,7 @@ def set_explicit_cover(album_dir: Path, dry_run: bool) -> bool:
     if not album_yaml.is_file():
         logger.debug("[%s] No album.yml; cannot record explicit cover", album_dir)
         return False
-    yaml = YAML()
+    yaml = create_yaml()
     yaml.preserve_quotes = True
     document = cast(dict[str, object], cast(_YamlRoundTrip, yaml).load(album_yaml))
     album_data = document.get("albumData")

@@ -23,6 +23,8 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError as RuamelYAMLError
 from yaml import YAMLError as PyYAMLError
 
+from mediascripts.common.yaml import create_yaml
+
 logger = logging.getLogger(__name__)
 
 BOOLEAN_LIKE_STRINGS = frozenset(
@@ -60,11 +62,25 @@ def _represent_track_yaml_string(representer: _YamlRepresenter, value: str) -> o
 
 def track_yaml(typ: str = "rt", *, preserve_quotes: bool = False) -> YAML:
     """Create a YAML handler that quotes boolean-like strings."""
-    yaml = YAML(typ=typ)
+    yaml = create_yaml(typ=typ)
     yaml.preserve_quotes = preserve_quotes
     yaml.default_flow_style = False
     yaml.representer.add_representer(str, _represent_track_yaml_string)
     return yaml
+
+
+def collection_relative_path(media_path: Path) -> str:
+    """Return a leading-slash collection path without resolving library symlinks."""
+    collection_root = os.environ.get("MOONGAS_COLLECTION_ROOTDIR")
+    if not collection_root:
+        raise ValueError("MOONGAS_COLLECTION_ROOTDIR must be set to write collection-relative media paths")
+    absolute_root = Path(os.path.abspath(collection_root))
+    absolute_media_path = Path(os.path.abspath(media_path))
+    try:
+        relative_path = absolute_media_path.relative_to(absolute_root)
+    except ValueError as error:
+        raise ValueError(f"Media file is outside the collection root: {media_path}") from error
+    return f"/{relative_path.as_posix()}"
 
 
 def save_yaml_atomically(

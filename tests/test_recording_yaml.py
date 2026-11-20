@@ -1,8 +1,8 @@
 from io import StringIO
 
 import pytest
-from ruamel.yaml import YAML
 
+from mediascripts.common.yaml import create_yaml
 from mediascripts.acoustid.recording_yaml import load_track, normalize_isrcs
 
 
@@ -30,12 +30,12 @@ def test_shared_list_serializes_without_aliases_or_forced_quotes() -> None:
     data = document(["GBAAA0500078"])
     assert normalize_isrcs(data)
     stream = StringIO()
-    YAML().dump(data, stream)
+    create_yaml().dump(data, stream)
     text = stream.getvalue()
     assert text.count("- GBAAA0500078") == 2
     assert '"GBAAA0500078"' not in text
     assert "&id" not in text and "*id" not in text
-    yaml = YAML()
+    yaml = create_yaml()
     assert not normalize_isrcs(yaml.load(text))
 
 
@@ -48,12 +48,12 @@ def test_invalid_values_are_reset(value: object) -> None:
 
 def test_existing_aliases_are_expanded() -> None:
     stream = StringIO()
-    YAML().dump(document(["GBAAA0500078"]), stream)
+    create_yaml().dump(document(["GBAAA0500078"]), stream)
     assert "&id" in stream.getvalue()
-    data = YAML().load(stream.getvalue())
+    data = create_yaml().load(stream.getvalue())
     assert normalize_isrcs(data)
     output = StringIO()
-    YAML().dump(data, output)
+    create_yaml().dump(data, output)
     assert "&id" not in output.getvalue()
     assert "*id" not in output.getvalue()
 
@@ -63,7 +63,7 @@ def test_block_sequence_comments_are_preserved() -> None:
         "trackData: {}\ntrackIdData:\n- acoustidData:\n    results:\n    - recordings:\n"
         "      - id: x\n        isrcs: # collection note\n        - GBAAA0500078 # recording note\n"
     )
-    yaml = YAML()
+    yaml = create_yaml()
     data = yaml.load(text)
     assert not normalize_isrcs(data)
     output = StringIO()
@@ -74,12 +74,12 @@ def test_block_sequence_comments_are_preserved() -> None:
 
 
 def test_unquoted_string_lists_are_not_flagged_for_repair() -> None:
-    data = YAML().load("trackIdData: [{acoustidData: {results: [{recordings: [{id: one, isrcs: [GBAAA0500078]}]}]}}]")
+    data = create_yaml().load("trackIdData: [{acoustidData: {results: [{recordings: [{id: one, isrcs: [GBAAA0500078]}]}]}}]")
     assert not normalize_isrcs(data)
 
 
 def test_scalar_track_id_data_is_normalized() -> None:
-    data = YAML().load(
+    data = create_yaml().load(
         "trackIdData: {acoustidData: {results: [{recordings: [{id: one, isrcs: invalid}]}]}}"
     )
     assert normalize_isrcs(data)
@@ -87,7 +87,7 @@ def test_scalar_track_id_data_is_normalized() -> None:
 
 
 def test_invalid_media_file_acoustid_isrc_lists_are_reset() -> None:
-    data = YAML().load(
+    data = create_yaml().load(
         "mediaFileData: [{acoustidData: {results: [{recordings: "
         "[{id: one, isrcs: invalid}]}]}}]"
     )
@@ -99,8 +99,8 @@ def test_yaml_handles_strings_that_need_quoting() -> None:
     data = document(["123", "true"])
     normalize_isrcs(data)
     output = StringIO()
-    YAML().dump(data, output)
-    assert YAML(typ="safe").load(output.getvalue()) == data
+    create_yaml().dump(data, output)
+    assert create_yaml(typ="safe").load(output.getvalue()) == data
 
 
 @pytest.mark.parametrize("dry_run", [True, False])

@@ -80,7 +80,8 @@ def test_terminal_choice_requires_no_enter_and_restores_terminal(
 @pytest.fixture
 def track(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("COPY_MEDIALIB_EXCLUDE_KEYWORDS", raising=False)
-    path = tmp_path / "Artist" / "Album [1995]" / "Track.mp3"
+    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    path = tmp_path / "data" / "Music" / "Artist" / "Album [1995]" / "Track.mp3"
     path.parent.mkdir(parents=True)
     tags = EasyID3()
     for key, value in {
@@ -133,11 +134,11 @@ def test_accept_either_source_for_each_field(
     assert document["trackIdData"]["streamingData"][0]["trackId"] == "keep-me"
     assert len(document["mediaFileData"]) == 1
     media_file = document["mediaFileData"][0]
-    assert media_file["path"] == str(track)
+    assert media_file["path"] == "/data/Music/Artist/Album [1995]/Track.mp3"
     assert set(media_file) <= MEDIAFILE_FIELDS
     assert "albumPath" not in media_file
     assert "artistPath" not in media_file
-    assert MediaFileData.from_yaml(yaml.safe_dump(media_file)).path == str(track)
+    assert MediaFileData.from_yaml(yaml.safe_dump(media_file)).path == media_file["path"]
     validate_track_yaml_content(yaml.safe_dump({
         "trackData": document["trackData"], "mediaFileData": [media_file],
     }))
@@ -182,7 +183,7 @@ def test_accept_yaml_logs_copy_and_confirms_persisted_id3_tag(
     assert EasyID3(track)["title"] == ["Track"]
     document = yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))
     assert document["trackData"]["title"] == "Track"
-    assert document["mediaFileData"][0]["path"] == str(track)
+    assert document["mediaFileData"][0]["path"] == "/data/Music/Artist/Album [1995]/Track.mp3"
 
 
 @pytest.mark.parametrize("choice", ["y", "m"])
@@ -276,7 +277,9 @@ def test_skip_preserves_conflicting_metadata_but_adds_media_file_data(
     assert not merge.merge_track(track)
     assert track.read_bytes() == before_media
     assert yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))["trackData"]["title"] == "Track"
-    assert yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))["mediaFileData"][0]["path"] == str(track)
+    assert yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))["mediaFileData"][0]["path"] == (
+        "/data/Music/Artist/Album [1995]/Track.mp3"
+    )
 
 
 def test_invalid_input_reprompts_and_uppercase_shortcut_works(
@@ -311,7 +314,7 @@ def test_missing_or_multiple_media_values_cannot_be_copied_to_scalar_yaml(
     assert "Cannot copy missing/multiple" in caplog.text
     document = yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))
     assert document["trackData"]["title"] == "Track"
-    assert document["mediaFileData"][0]["path"] == str(track)
+    assert document["mediaFileData"][0]["path"] == "/data/Music/Artist/Album [1995]/Track.mp3"
 
 
 def test_quiet_matching_track_adds_media_file_data_without_prompt(
@@ -428,7 +431,6 @@ def test_merge_cli_recurses_and_quiet_does_not_hide_conflicts(
     track: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str], flag: str
 ) -> None:
-    monkeypatch.delenv("MOONGAS_COLLECTION_ROOTDIR", raising=False)
     tags = EasyID3(track)
     tags["title"] = "Different"
     tags.save(track)
@@ -532,15 +534,49 @@ def test_mixed_choices_in_real_cli_preserve_skipped_field(
 
 
 def test_collection_environment_is_used_without_directory_argument(
-    track: Path, monkeypatch: pytest.MonkeyPatch
+    track: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(track.parent.parent.parent))
-    data = track.parent.parent.parent / "data"
+    collection = tmp_path / "linked-collection"
+    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(collection))
+    data = collection / "data"
     (data / "Music").mkdir(parents=True)
     (data / "Music" / "Artist").symlink_to(track.parent.parent, target_is_directory=True)
     monkeypatch.setattr(sys, "argv", ["merge-track-yaml-with-media-file", "-q"])
     monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("Unexpected prompt"))
     assert merge.main() == 0
+    document = yaml.safe_load(track.with_suffix(".yml").read_text(encoding="utf-8"))
+    assert document["mediaFileData"][0]["path"] == "/data/Music/Artist/Album [1995]/Track.mp3"
+
+
+@pytest.mark.parametrize("root", [None, "outside"])
+def test_invalid_collection_root_fails_before_changing_files(
+    track: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, root: str | None,
+) -> None:
+    if root is None:
+        monkeypatch.delenv("MOONGAS_COLLECTION_ROOTDIR", raising=False)
+    else:
+        monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path / root))
+    tags = EasyID3(track)
+    tags["title"] = "Different title"
+    tags.save(track)
+    before = (track.read_bytes(), track.with_suffix(".yml").read_bytes())
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("Unexpected prompt"))
+
+    assert not merge.merge_track(track)
+
+    assert (track.read_bytes(), track.with_suffix(".yml").read_bytes()) == before
+    assert ("must be set" if root is None else "outside the collection root") in caplog.text
+
+
+def test_cli_requires_collection_root_even_with_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.delenv("MOONGAS_COLLECTION_ROOTDIR", raising=False)
+    monkeypatch.setattr(sys, "argv", ["merge-track-yaml-with-media-file", "--dir", str(tmp_path)])
+
+    assert merge.main() == 1
+    assert "MOONGAS_COLLECTION_ROOTDIR must be set" in caplog.text
 
 
 def test_failed_media_save_reports_error(

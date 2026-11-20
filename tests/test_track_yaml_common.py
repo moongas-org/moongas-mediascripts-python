@@ -7,6 +7,28 @@ from yaml import safe_load
 from mediascripts.track.track_yaml import track_yaml_common as common
 
 
+@pytest.mark.parametrize("relative", [False, True])
+def test_collection_path_preserves_names_and_normalizes_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: bool,
+) -> None:
+    root = tmp_path / "collection"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", "collection/" if relative else f"{root}/")
+    suffix = "data/Music/Mama's Broke/Count the Wicked [2017]/01 - Count the Wicked.mp3"
+    path = (Path("collection") if relative else root) / "unused" / ".." / suffix
+
+    assert common.collection_relative_path(path) == f"/{suffix}"
+
+
+def test_collection_path_rejects_sibling_with_matching_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path / "collection"))
+
+    with pytest.raises(ValueError, match="outside the collection root"):
+        common.collection_relative_path(tmp_path / "collection-other" / "Track.mp3")
+
+
 @pytest.mark.parametrize("value", sorted(common.BOOLEAN_LIKE_STRINGS))
 def test_track_yaml_quotes_boolean_like_strings_for_yaml_11_consumers(value: str) -> None:
     yaml = common.track_yaml()

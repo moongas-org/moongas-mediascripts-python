@@ -11,12 +11,12 @@ from io import StringIO
 from pathlib import Path
 from typing import Protocol, cast
 
-from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedBase
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 from ruamel.yaml.tokens import CommentToken
 
+from mediascripts.common.yaml import create_yaml
 from mediascripts.track.track_yaml.scan_media_files_to_track_yaml import (
     TRACK_YAML_SUFFIXES,
     collection_data_path,
@@ -175,7 +175,7 @@ def _comments(content: str) -> Counter[str]:
             for item in cast(Sequence[object], value):
                 collect(item)
 
-    for token in cast(_Yaml, YAML()).scan(content):
+    for token in cast(_Yaml, create_yaml()).scan(content):
         collect(token.comment)
     return comments
 
@@ -240,13 +240,13 @@ def reformat_track_yaml(path: Path, dry_run: bool = False) -> bool:
     reformatted = _set_block_style(data, set())
     if not repaired and not reformatted:
         return False
-    original_node = cast(_Yaml, YAML()).compose(original)
+    original_node = cast(_Yaml, create_yaml()).compose(original)
     if repaired:
         _expected_acoustid_repairs(original_node)
     output = StringIO()
     typed_yaml.dump(data, output)
     proposed = output.getvalue()
-    proposed_node = cast(_Yaml, YAML()).compose(proposed)
+    proposed_node = cast(_Yaml, create_yaml()).compose(proposed)
     if not _same_yaml_nodes(original_node, proposed_node, {}, {}):
         raise ValueError("YAML content or aliases would change during reformatting")
     if _has_flow_collections(proposed_node, set()):

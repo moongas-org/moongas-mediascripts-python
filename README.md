@@ -606,6 +606,9 @@ track:
   track-yaml-reformat
 ```
 
+Use `rename-album-files -q` (or `--quiet`) to show only successful renames and
+errors. With `--dry-run --quiet`, planned renames are not printed.
+
 ## Copy Media Library Diagnostics
 
 `copy-medialib` logs its source, destination, filters, and overwrite settings
@@ -1104,6 +1107,11 @@ Each accepted field is saved immediately. Unrelated media tags and YAML fields,
 comments, and quoted strings are preserved using round-trip YAML support.
 The merge also fills missing `mediaFileData` values using the mediascan
 `MediaFileData` model, preserving existing values and fingerprint/AcoustID data.
+New `path` values are relative to `MOONGAS_COLLECTION_ROOTDIR` with a leading
+slash, for example `/data/Music/Artist/Album [1995]/Track.mp3`. Library symlinks
+are not resolved. The variable is required even with `--dir`, and media files
+outside that root are rejected before any changes to their tags or YAML.
+Existing `path` values are preserved.
 Obsolete `albumPath` and `artistPath` fields are removed from that entry.
 YAML updates use a temporary file and atomic replacement. `--quiet` suppresses
 matching tracks, not conflict prompts or errors. Ctrl+C or end-of-input stops

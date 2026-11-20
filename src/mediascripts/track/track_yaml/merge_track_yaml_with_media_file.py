@@ -3,6 +3,8 @@
 Use the collection configured by MOONGAS_COLLECTION_ROOTDIR, or recursively scan
 -d / --dir DIRECTORY. Artist exclusions and comparison rules match the comparison
 script. -q / --quiet hides matching tracks, never conflict prompts.
+MOONGAS_COLLECTION_ROOTDIR is required even with --dir; new media paths are
+stored relative to that root with a leading slash (for example /data/Music/...).
 
 For each conflicting field, press y (Accept Track YAML), m (Accept Media File
 Tags), e (Enter value, updates both files), or s (Skip), without pressing Enter.
@@ -13,6 +15,7 @@ Exit status: 0 if resolved, 1 if skipped/errors, 130 if interrupted.
 """
 
 import logging
+import os
 import re
 import sys
 from collections.abc import Mapping, MutableMapping
@@ -32,6 +35,7 @@ from mediascripts.track.track_yaml.track_yaml_common import (
     TAG_FIELDS,
     TRACK_ERRORS,
     TextWriter,
+    collection_relative_path,
     format_field_diff,
     load_track_metadata,
     run_cli,
@@ -142,7 +146,7 @@ def add_missing_media_file_data(
 
     file_stat = track_path.stat()
     metadata = MediaFileData(
-        path=str(track_path),
+        path=collection_relative_path(track_path),
         size=file_stat.st_size,
         format=track_path.suffix.lstrip(".").lower(),
         title=next(iter(tags.get("title", [])), track_data.title),
@@ -189,6 +193,7 @@ def merge_track(track_path: Path, quiet: bool = False) -> bool:
         metadata = load_track_metadata(track_path)
         if metadata is None:
             return True
+        collection_relative_path(track_path)
         track_data, tags = metadata
         writable_tags = cast(MutableMapping[str, list[str]], tags)
         resolved = True
@@ -252,6 +257,9 @@ def merge_track(track_path: Path, quiet: bool = False) -> bool:
 
 
 def main() -> int:
+    if not os.environ.get("MOONGAS_COLLECTION_ROOTDIR"):
+        logger.error("MOONGAS_COLLECTION_ROOTDIR must be set to write collection-relative media paths")
+        return 1
     try:
         return run_cli(__doc__, merge_track)
     except (KeyboardInterrupt, EOFError):

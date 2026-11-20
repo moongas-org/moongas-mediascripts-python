@@ -12,8 +12,8 @@ from mutagen.flac import FLAC, Picture
 from mutagen.id3 import COMM, ID3, TCOM, TCON, TCOP, TDRC, TIT2, TPE1, TRCK
 from mutagen.mp4 import MP4
 from PIL import Image
-from ruamel.yaml import YAML
 
+from mediascripts.common.yaml import create_yaml
 from mediascripts.mediafile import auto_tag_media_file as tagger
 
 
@@ -43,7 +43,7 @@ def track(tmp_path: Path) -> Path:
 def write_yaml(track: Path, data: object, suffix: str = ".yml", key: str = "trackData") -> Path:
     path = track.with_suffix(suffix)
     with path.open("w") as stream:
-        YAML().dump({key: data}, stream)
+        create_yaml().dump({key: data}, stream)
     return path
 
 

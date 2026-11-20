@@ -21,7 +21,6 @@ from mediascan.types.track.track_yaml_file_validator import (
     validate_track_yaml_content,
 )
 from openai import APIError, APIStatusError, OpenAI
-from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 from tqdm import tqdm
 from yaml.error import YAMLError as PyYAMLError
@@ -29,6 +28,7 @@ from yaml.error import YAMLError as PyYAMLError
 from mediascripts.common.cli.parse_boolean import parse_boolean
 from mediascripts.common.files import shuffled_files
 from mediascripts.common.openai.client import MODEL_NAME, get_client
+from mediascripts.common.yaml import create_yaml
 from mediascripts.mediafile.auto_tag_media_file import load_media, read_track_values, text_values, unescape_name
 from mediascripts.track.track_yaml.infer_genre import filter_valid_genres, infer_artist_genre
 from mediascripts.track.track_yaml.track_yaml_common import (
@@ -82,7 +82,7 @@ def normalize_model_identifiers(content: str) -> str:
     identifiers = document.get("trackIdData")
     if not is_mapping(identifiers):
         return content
-    lexical = cast(_YamlLoader, YAML(typ="base")).load(content)
+    lexical = cast(_YamlLoader, create_yaml(typ="base")).load(content)
     if not is_mapping(lexical) or not is_mapping(lexical.get("trackIdData")):
         return content
     lexical_entry = cast(dict[str, object], lexical["trackIdData"])

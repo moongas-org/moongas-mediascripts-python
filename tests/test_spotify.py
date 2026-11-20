@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
-from ruamel.yaml import YAML
 
+from mediascripts.common.yaml import create_yaml
 from mediascripts.spotify import client as spotify_api
 from mediascripts.spotify import spotify, track_yaml
 
@@ -143,7 +143,7 @@ class YamlLoader(Protocol):
 
 
 def load(path: Path) -> dict[str, object]:
-    document = cast(YamlLoader, YAML(typ="safe")).load(path.read_text())
+    document = cast(YamlLoader, create_yaml(typ="safe")).load(path.read_text())
     assert spotify.is_mapping(document)
     return document
 

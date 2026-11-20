@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from ruamel.yaml import YAML
 from ruamel.yaml.nodes import MappingNode, Node, SequenceNode
 
+from mediascripts.common.yaml import create_yaml
 from mediascripts.track.track_yaml.track_yaml_reformat import main, reformat_track_yaml
 
 
@@ -53,7 +53,7 @@ alias: *shared
     assert "# Header" in result and "# track" in result
     assert '"Song"' in result and "'One'" in result
     assert "empty: []" in result and "tags: {}" in result
-    yaml = YAML()
+    yaml = create_yaml()
     parsed = yaml.load(result)
     assert parsed["shared"] is parsed["alias"]
     assert_block_collections(yaml.compose(result))
@@ -86,7 +86,7 @@ def test_unchanged_files_do_not_require_a_second_parse(
     def unexpected_compose(*args: object, **kwargs: object) -> None:
         pytest.fail("Unchanged YAML should not be parsed twice")
 
-    monkeypatch.setattr(YAML, "compose", unexpected_compose)
+    monkeypatch.setattr(type(create_yaml()), "compose", unexpected_compose)
 
     assert not reformat_track_yaml(path)
     assert not path.with_suffix(".yml.bak").exists()
@@ -157,7 +157,7 @@ def test_missing_acoustid_recordings_are_repaired(
         assert not backup.exists()
     else:
         content = path.read_text(encoding="utf-8")
-        results = YAML().load(content)[media_key][0][acoustid_key]["results"]
+        results = create_yaml().load(content)[media_key][0][acoustid_key]["results"]
         assert results[0] == {
             "id": "ce5c6d17-e019-4f29-a57d-baf821410c44", "score": 0.99709123, "recordings": [],
         }
@@ -180,8 +180,8 @@ def test_existing_acoustid_recordings_are_not_replaced(tmp_path: Path, recording
 
     reformat_track_yaml(path)
 
-    document = YAML().load(path.read_text(encoding="utf-8"))
-    assert document["mediaFileData"][0]["acoustidData"]["results"][0]["recordings"] == YAML().load(recordings)
+    document = create_yaml().load(path.read_text(encoding="utf-8"))
+    assert document["mediaFileData"][0]["acoustidData"]["results"][0]["recordings"] == create_yaml().load(recordings)
     assert document["trackIdData"]["acoustidData"]["results"] == [{"id": "unrelated"}]
 
 
@@ -196,7 +196,7 @@ def test_acoustid_repair_preserves_aliases(tmp_path: Path) -> None:
 
     assert reformat_track_yaml(path)
 
-    results = YAML().load(path.read_text(encoding="utf-8"))["mediaFileData"][0]["acoustidData"]["results"]
+    results = create_yaml().load(path.read_text(encoding="utf-8"))["mediaFileData"][0]["acoustidData"]["results"]
     assert results[0] is results[1]
     assert results[0]["recordings"] == []
 
@@ -243,7 +243,7 @@ def test_merge_keys_are_preserved(tmp_path: Path) -> None:
     assert reformat_track_yaml(path)
     result = path.read_text(encoding="utf-8")
     assert "<<: *defaults" in result
-    assert_block_collections(YAML().compose(result))
+    assert_block_collections(create_yaml().compose(result))
 
 
 def test_flow_mapping_keys_and_sets_are_reformatted(tmp_path: Path) -> None:
@@ -251,7 +251,7 @@ def test_flow_mapping_keys_and_sets_are_reformatted(tmp_path: Path) -> None:
     path.write_text("? [one, two]\n: !!set {first: null, second: null}\n", encoding="utf-8")
 
     assert reformat_track_yaml(path)
-    assert_block_collections(YAML().compose(path.read_text(encoding="utf-8")))
+    assert_block_collections(create_yaml().compose(path.read_text(encoding="utf-8")))
 
 
 def test_directory_cli_excludes_metadata_and_continues_after_error(
@@ -268,7 +268,7 @@ def test_directory_cli_excludes_metadata_and_continues_after_error(
     with caplog.at_level(logging.INFO):
         assert main() == 1
     assert "title: Song" in good.read_text(encoding="utf-8")
-    assert_block_collections(YAML().compose(good.read_text(encoding="utf-8")))
+    assert_block_collections(create_yaml().compose(good.read_text(encoding="utf-8")))
     assert artist.read_text(encoding="utf-8") == "artistData: {name: Artist}\n"
     assert "Could not reformat" in caplog.text and str(bad) in caplog.text
     assert "Updated " not in caplog.text
@@ -334,7 +334,7 @@ def test_symlink_file_preserved(tmp_path: Path) -> None:
 
     assert reformat_track_yaml(link)
     assert link.is_symlink()
-    assert_block_collections(YAML().compose(target.read_text(encoding="utf-8")))
+    assert_block_collections(create_yaml().compose(target.read_text(encoding="utf-8")))
 
 
 def test_default_collection_scans_album_directories_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -348,5 +348,5 @@ def test_default_collection_scans_album_directories_only(tmp_path: Path, monkeyp
     monkeypatch.setattr(sys, "argv", ["track-yaml-reformat"])
 
     assert main() == 0
-    assert_block_collections(YAML().compose(track.read_text(encoding="utf-8")))
+    assert_block_collections(create_yaml().compose(track.read_text(encoding="utf-8")))
     assert outside.read_text(encoding="utf-8") == "x: [one, two]\n"
