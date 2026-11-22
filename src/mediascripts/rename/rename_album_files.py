@@ -19,10 +19,11 @@ import re
 import sys
 from io import StringIO
 from pathlib import Path
+from typing import Protocol, cast
 
 from mediascan.types.album.album_path import AlbumPath, AlbumPathBuilder
 
-from mediascripts.track.track_yaml.track_yaml_common import save_yaml_atomically, track_yaml
+from mediascripts.track.track_yaml.track_yaml_common import TextWriter, save_yaml_atomically, track_yaml
 
 MOONGAS_COLLECTION_ROOTDIR = os.environ.get(
     "MOONGAS_COLLECTION_ROOTDIR", "../../moongas-collection-demo"
@@ -62,6 +63,12 @@ patterns: list[tuple[re.Pattern[str], str]] = [
 
 # A " - " style separator; a dash needs whitespace on at least one side so "Jay-Z" stays intact
 segment_separator = re.compile(r"\s+[-–—]\s*|\s*[-–—]\s+")
+
+
+class _YamlHandler(Protocol):
+    def load(self, stream: str) -> object: ...
+
+    def dump(self, data: object, stream: StringIO) -> object: ...
 
 
 def normalize_artist_name(name: str) -> str:
@@ -104,24 +111,25 @@ def prepare_rename_tasks(album_path: AlbumPath, *, quiet: bool = False) -> list[
     return rename_tasks
 
 
-def update_file_references(document: object, renames: dict[str, str]) -> bool:
+def update_file_references(document: object, renames: dict[str, str]) -> tuple[object, bool]:
     """Update filename/path values without changing directory names or partial matches."""
+    if isinstance(document, str):
+        filename = re.split(r"[/\\]", document)[-1]
+        if filename in renames:
+            return document[:-len(filename)] + renames[filename], True
+        return document, False
     changed = False
     if isinstance(document, dict):
-        items = document.items()
+        mapping = cast(dict[object, object], document)
+        for key, value in mapping.items():
+            mapping[key], updated = update_file_references(value, renames)
+            changed |= updated
     elif isinstance(document, list):
-        items = enumerate(document)
-    else:
-        return False
-    for key, value in items:
-        if isinstance(value, str):
-            filename = re.split(r"[/\\]", value)[-1]
-            if filename in renames:
-                document[key] = value[:-len(filename)] + renames[filename]
-                changed = True
-        elif update_file_references(value, renames):
-            changed = True
-    return changed
+        sequence = cast(list[object], document)
+        for index, value in enumerate(sequence):
+            sequence[index], updated = update_file_references(value, renames)
+            changed |= updated
+    return cast(object, document), changed
 
 
 def perform_rename_tasks(
@@ -141,9 +149,10 @@ def perform_rename_tasks(
             if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml"}:
                 continue
             original_content = path.read_bytes().decode("utf-8")
-            yaml = track_yaml(preserve_quotes=True)
-            document: object = yaml.load(original_content)
-            if update_file_references(document, renames):
+            yaml = cast(_YamlHandler, track_yaml(preserve_quotes=True))
+            document = yaml.load(original_content)
+            document, changed = update_file_references(document, renames)
+            if changed:
                 output = StringIO()
                 yaml.dump(document, output)
                 updated_path = path.with_name(renames.get(path.name, path.name))
@@ -155,11 +164,17 @@ def perform_rename_tasks(
                 os.rename(original_path, updated_path)
                 renamed_paths.append((original_path, updated_path))
             for path, original_content, updated_content in yaml_updates:
-                save_yaml_atomically(path, lambda stream: stream.write(updated_content))
+                def write_updated(stream: TextWriter) -> None:
+                    stream.write(updated_content)
+
+                save_yaml_atomically(path, write_updated)
                 saved_yaml.append((path, original_content))
         except OSError:
             for path, original_content in reversed(saved_yaml):
-                save_yaml_atomically(path, lambda stream: stream.write(original_content))
+                def write_original(stream: TextWriter) -> None:
+                    stream.write(original_content)
+
+                save_yaml_atomically(path, write_original)
             for original_path, updated_path in reversed(renamed_paths):
                 os.rename(updated_path, original_path)
             raise

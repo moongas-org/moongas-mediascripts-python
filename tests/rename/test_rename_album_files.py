@@ -1,8 +1,10 @@
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from ruamel.yaml.error import YAMLError
 from yaml import safe_load
 
 from mediascripts.rename import rename_album_files as rename
@@ -183,3 +185,82 @@ def test_rename_updates_unchanged_yaml_and_preserves_collision_references(tmp_pa
         ]
     }
     assert (album / "Song.mp3").read_bytes() == b"keep"
+
+
+def test_rename_preserves_yaml_validity_when_normalizing_apostrophes(tmp_path: Path) -> None:
+    album = tmp_path / "data" / "Music" / "Artist" / "Album [2000]"
+    album.mkdir(parents=True)
+    (album / "Song’s [Official Video].mp3").touch()
+    yaml_path = album / "Track.yml"
+    yaml_path.write_text(
+        "mediaFileData:\n"
+        "  - path: 'Song’s [Official Video].mp3'\n"
+        '  - path: "Song’s [Official Video].mp3"\n'
+        "unrelated: Song’s [Official Video].mp3.bak\n",
+        encoding="utf-8",
+    )
+
+    assert rename.rename_album_files(album, quiet=True) == 1
+
+    assert safe_load(yaml_path.read_text(encoding="utf-8")) == {
+        "mediaFileData": [{"path": "Song's.mp3"}, {"path": "Song's.mp3"}],
+        "unrelated": "Song’s [Official Video].mp3.bak",
+    }
+    assert (album / "Song's.mp3").exists()
+
+
+def test_invalid_yaml_aborts_before_renaming(tmp_path: Path) -> None:
+    album = tmp_path / "data" / "Music" / "Artist" / "Album [2000]"
+    album.mkdir(parents=True)
+    media_path = album / "Song [Official Video].mp3"
+    media_path.touch()
+    yaml_path = media_path.with_suffix(".yml")
+    yaml_path.write_text("mediaFileData: [\n", encoding="utf-8")
+
+    with pytest.raises(YAMLError):
+        rename.rename_album_files(album, quiet=True)
+
+    assert media_path.exists()
+    assert yaml_path.read_text(encoding="utf-8") == "mediaFileData: [\n"
+    assert len(list(album.iterdir())) == 2
+
+
+@pytest.mark.parametrize("failure", ["rename", "save"])
+def test_rename_rolls_back_on_filesystem_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    album = tmp_path / "data" / "Music" / "Artist" / "Album [2000]"
+    album.mkdir(parents=True)
+    (album / "Song [Official Video].mp3").write_bytes(b"media")
+    content = "mediaFileData:\n  - path: Song [Official Video].mp3\n"
+    (album / "Song [Official Video].yml").write_text(content, encoding="utf-8")
+    (album / "Other.yml").write_text(content, encoding="utf-8")
+    originals = {path.name: path.read_bytes() for path in album.iterdir()}
+    calls = 0
+    if failure == "rename":
+        original_rename = rename.os.rename
+
+        def fail_second_rename(source: Path, destination: Path) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("rename failed")
+            original_rename(source, destination)
+
+        monkeypatch.setattr(rename.os, "rename", fail_second_rename)
+    else:
+        original_save = rename.save_yaml_atomically
+
+        def fail_second_save(path: Path, write: Callable[[rename.TextWriter], None]) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("save failed")
+            original_save(path, write)
+
+        monkeypatch.setattr(rename, "save_yaml_atomically", fail_second_save)
+
+    with pytest.raises(OSError, match=f"{failure} failed"):
+        rename.rename_album_files(album, quiet=True)
+
+    assert {path.name: path.read_bytes() for path in album.iterdir()} == originals
