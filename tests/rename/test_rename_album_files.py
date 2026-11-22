@@ -48,6 +48,8 @@ def test_update_filename_normalizes_artist_and_featured_artist() -> None:
         ("01 - Song Ft_ A.mp3", "X", "01 - Song ft A.mp3"),
         ("01 - Song featuring A.mp3", "X", "01 - Song ft A.mp3"),
         ("01 - Daft Creature Defeat.mp3", "X", "01 - Daft Creature Defeat.mp3"),
+        ("05 - Nuthin’ but a “G” Thang.yml", "Dr_ Dre", "05 - Nuthin' but a 'G' Thang.yml"),
+        ('Song "quoted".mp3', "X", "Song 'quoted'.mp3"),
     ],
 )
 def test_update_filename_cases(filename: str, artist: str, expected: str) -> None:
@@ -207,6 +209,56 @@ def test_rename_preserves_yaml_validity_when_normalizing_apostrophes(tmp_path: P
         "unrelated": "Song’s [Official Video].mp3.bak",
     }
     assert (album / "Song's.mp3").exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_rename_double_quotes_for_ntfs_and_update_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool,
+) -> None:
+    album = tmp_path / "data" / "Music" / "Dr_ Dre" / "The Chronic [1992]"
+    album.mkdir(parents=True)
+    original_stem = "05 - Nuthin’ but a “G” Thang"
+    updated_stem = "05 - Nuthin' but a 'G' Thang"
+    (album / f"{original_stem}.mp3").write_bytes(b"media")
+    yaml_path = album / f"{original_stem}.yml"
+    original_content = f'mediaFileData:\n  - path: "{original_stem}.mp3"\n'
+    yaml_path.write_text(original_content, encoding="utf-8")
+    real_rename = rename.os.rename
+
+    def ntfs_rename(source: Path, destination: Path) -> None:
+        if '"' in destination.name:
+            raise OSError(22, "Invalid argument", str(destination))
+        real_rename(source, destination)
+
+    monkeypatch.setattr(rename.os, "rename", ntfs_rename)
+
+    assert rename.rename_album_files(album, dry_run=dry_run, quiet=True) == 2
+    if dry_run:
+        assert yaml_path.read_text(encoding="utf-8") == original_content
+        assert (album / f"{original_stem}.mp3").exists()
+    else:
+        assert (album / f"{updated_stem}.mp3").read_bytes() == b"media"
+        assert safe_load((album / f"{updated_stem}.yml").read_text(encoding="utf-8")) == {
+            "mediaFileData": [{"path": f"{updated_stem}.mp3"}],
+        }
+        assert not yaml_path.exists()
+
+
+def test_quote_normalization_collision_preserves_references(tmp_path: Path) -> None:
+    album = tmp_path / "data" / "Music" / "Artist" / "Album [2000]"
+    album.mkdir(parents=True)
+    original = album / "Song “quoted”.mp3"
+    original.write_bytes(b"original")
+    target = album / "Song 'quoted'.mp3"
+    target.write_bytes(b"existing")
+    yaml_path = album / "Track.yml"
+    content = 'mediaFileData:\n  - path: Song “quoted”.mp3\n'
+    yaml_path.write_text(content, encoding="utf-8")
+
+    assert rename.rename_album_files(album, quiet=True) == 0
+    assert original.read_bytes() == b"original"
+    assert target.read_bytes() == b"existing"
+    assert yaml_path.read_text(encoding="utf-8") == content
 
 
 def test_invalid_yaml_aborts_before_renaming(tmp_path: Path) -> None:

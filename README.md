@@ -613,6 +613,8 @@ errors. With `--dry-run --quiet`, planned renames are not printed.
 references in the album's `.yml` and `.yaml` files, including all media formats
 for a track. References to files skipped because of a filename collision stay
 unchanged. YAML comments and quoting are preserved; dry runs do not modify files.
+Straight and curly double quotation marks in filenames become single quotes,
+which avoids invalid double-quote characters on NTFS.
 
 ## Copy Media Library Diagnostics
 

@@ -9,6 +9,7 @@ Updates references in album YAML files to match the files actually renamed.
 Rules:
 - Strips any square bracket text like '[Official Music Video]'
 - Replaces curved apostrophe with straight apostrophe
+- Replaces double quotation marks with single quotes for filesystem compatibility
 - Strips stupid little emojis like '🔄'
 - etc.
 """
@@ -50,8 +51,7 @@ patterns: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"‐"), "-"),
     (re.compile(r"’"), "'"),
     (re.compile(r"´"), "'"),
-    (re.compile(r"“"), '"'),
-    (re.compile(r"”"), '"'),
+    (re.compile(r'[“”"]'), "'"),
     (re.compile(r"\$"), "_"),
     (re.compile(r"&"), "and"),
     (re.compile(r"＊"), "_"),
