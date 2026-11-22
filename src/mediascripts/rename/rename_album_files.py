@@ -169,7 +169,7 @@ def perform_rename_tasks(
 
                 save_yaml_atomically(path, write_updated)
                 saved_yaml.append((path, original_content))
-        except OSError:
+        except (OSError, KeyboardInterrupt):
             for path, original_content in reversed(saved_yaml):
                 def write_original(stream: TextWriter) -> None:
                     stream.write(original_content)

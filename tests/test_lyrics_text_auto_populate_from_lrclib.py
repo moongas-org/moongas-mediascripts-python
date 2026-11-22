@@ -12,6 +12,19 @@ from mediascripts.lyrics.lyrics_text import lyrics_text_auto_populate as combine
 from mediascripts.lyrics.lyrics_text import lyrics_text_auto_populate_from_lrclib
 
 
+def test_main_returns_interrupted_exit_status(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    def interrupt(**_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sys, "argv", ["lyrics-text-auto-populate-from-lrclib"])
+    monkeypatch.setattr(lyrics_text_auto_populate_from_lrclib, "main_loop", interrupt)
+    with caplog.at_level(logging.INFO):
+        assert lyrics_text_auto_populate_from_lrclib.main() == 130
+    assert "Interrupted by user; exiting" in caplog.text
+
+
 @pytest.mark.parametrize("suffix", [".mp3", ".yml", ".yaml", ".YML"])
 def test_file_argument_uses_same_track_for_media_or_yaml(
     tmp_path: Path,

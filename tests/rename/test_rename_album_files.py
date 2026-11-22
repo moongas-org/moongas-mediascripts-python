@@ -278,8 +278,10 @@ def test_invalid_yaml_aborts_before_renaming(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("failure", ["rename", "save"])
+@pytest.mark.parametrize("error_type", [OSError, KeyboardInterrupt])
 def test_rename_rolls_back_on_filesystem_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    error_type: type[OSError] | type[KeyboardInterrupt],
 ) -> None:
     album = tmp_path / "data" / "Music" / "Artist" / "Album [2000]"
     album.mkdir(parents=True)
@@ -296,7 +298,7 @@ def test_rename_rolls_back_on_filesystem_failure(
             nonlocal calls
             calls += 1
             if calls == 2:
-                raise OSError("rename failed")
+                raise error_type("rename failed")
             original_rename(source, destination)
 
         monkeypatch.setattr(rename.os, "rename", fail_second_rename)
@@ -307,12 +309,12 @@ def test_rename_rolls_back_on_filesystem_failure(
             nonlocal calls
             calls += 1
             if calls == 2:
-                raise OSError("save failed")
+                raise error_type("save failed")
             original_save(path, write)
 
         monkeypatch.setattr(rename, "save_yaml_atomically", fail_second_save)
 
-    with pytest.raises(OSError, match=f"{failure} failed"):
+    with pytest.raises(error_type, match=f"{failure} failed"):
         rename.rename_album_files(album, quiet=True)
 
     assert {path.name: path.read_bytes() for path in album.iterdir()} == originals

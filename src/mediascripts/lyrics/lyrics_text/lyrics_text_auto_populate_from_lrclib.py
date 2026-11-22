@@ -482,7 +482,7 @@ def main_loop(
     )
 
 
-def main():
+def main() -> int | None:
     parser = argparse.ArgumentParser(
         description="Populate missing lyrics text files for media tracks using LRCLIB."
     )
@@ -537,7 +537,8 @@ def main():
         )
     except KeyboardInterrupt:
         logger.info("Interrupted by user; exiting")
+        return 130
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

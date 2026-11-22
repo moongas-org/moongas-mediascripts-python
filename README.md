@@ -606,6 +606,10 @@ track:
   track-yaml-reformat
 ```
 
+Python console scripts exit with status 130 when interrupted with Ctrl+C, without
+a traceback. Completed changes may remain; review the command's output before
+rerunning it.
+
 Use `rename-album-files -q` (or `--quiet`) to show only successful renames and
 errors. With `--dry-run --quiet`, planned renames are not printed.
 

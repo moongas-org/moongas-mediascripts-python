@@ -6,6 +6,8 @@ import logging
 import shutil
 from pathlib import Path
 
+from mediascripts import console
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,7 +74,12 @@ def list_media_scripts():
         package_name = ep.dist.name if ep.dist else "Unknown"
         if not package_name.startswith("media"):
             continue
-        parts = ep.value.split(":")[0].split(".")
+        module, _, attribute = ep.value.partition(":")
+        if module == "mediascripts.console":
+            entry = getattr(console, attribute, None)
+            if isinstance(entry, console.ConsoleScript):
+                module = entry.module
+        parts = module.split(".")
         group = parts[1] if len(parts) > 2 else "(root)"
         if ep.name != "mediascripts":
             groups.setdefault(group, []).append(ep.name)
