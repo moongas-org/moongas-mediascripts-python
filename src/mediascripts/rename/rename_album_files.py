@@ -5,6 +5,7 @@ Usage: rename-album-files [--dir ALBUM_DIR] [--dry-run] [-q | --quiet]
 By default, walks every album directory in $MOONGAS_COLLECTION_ROOTDIR/data.
 Use --dir to process a single specific album directory instead.
 Renames files in accordance with various rules.
+Updates references in album YAML files to match the files actually renamed.
 Rules:
 - Strips any square bracket text like '[Official Music Video]'
 - Replaces curved apostrophe with straight apostrophe
@@ -16,9 +17,12 @@ import argparse
 import os
 import re
 import sys
+from io import StringIO
 from pathlib import Path
 
 from mediascan.types.album.album_path import AlbumPath, AlbumPathBuilder
+
+from mediascripts.track.track_yaml.track_yaml_common import save_yaml_atomically, track_yaml
 
 MOONGAS_COLLECTION_ROOTDIR = os.environ.get(
     "MOONGAS_COLLECTION_ROOTDIR", "../../moongas-collection-demo"
@@ -100,6 +104,26 @@ def prepare_rename_tasks(album_path: AlbumPath, *, quiet: bool = False) -> list[
     return rename_tasks
 
 
+def update_file_references(document: object, renames: dict[str, str]) -> bool:
+    """Update filename/path values without changing directory names or partial matches."""
+    changed = False
+    if isinstance(document, dict):
+        items = document.items()
+    elif isinstance(document, list):
+        items = enumerate(document)
+    else:
+        return False
+    for key, value in items:
+        if isinstance(value, str):
+            filename = re.split(r"[/\\]", value)[-1]
+            if filename in renames:
+                document[key] = value[:-len(filename)] + renames[filename]
+                changed = True
+        elif update_file_references(value, renames):
+            changed = True
+    return changed
+
+
 def perform_rename_tasks(
     album_path: AlbumPath,
     rename_tasks: list[tuple[str, str]],
@@ -107,12 +131,39 @@ def perform_rename_tasks(
     *,
     quiet: bool = False,
 ) -> None:
+    yaml_updates: list[tuple[Path, str, str]] = []
+    renamed_paths: list[tuple[Path, Path]] = []
+    saved_yaml: list[tuple[Path, str]] = []
+    if not dry_run:
+        renames = dict(rename_tasks)
+        # Load and serialize before renaming anything, so invalid YAML cannot break references.
+        for path in sorted(album_path.path.iterdir()):
+            if not path.is_file() or path.suffix.lower() not in {".yml", ".yaml"}:
+                continue
+            original_content = path.read_bytes().decode("utf-8")
+            yaml = track_yaml(preserve_quotes=True)
+            document: object = yaml.load(original_content)
+            if update_file_references(document, renames):
+                output = StringIO()
+                yaml.dump(document, output)
+                updated_path = path.with_name(renames.get(path.name, path.name))
+                yaml_updates.append((updated_path, original_content, output.getvalue()))
+        try:
+            for original, updated in rename_tasks:
+                original_path = album_path.path / original
+                updated_path = album_path.path / updated
+                os.rename(original_path, updated_path)
+                renamed_paths.append((original_path, updated_path))
+            for path, original_content, updated_content in yaml_updates:
+                save_yaml_atomically(path, lambda stream: stream.write(updated_content))
+                saved_yaml.append((path, original_content))
+        except OSError:
+            for path, original_content in reversed(saved_yaml):
+                save_yaml_atomically(path, lambda stream: stream.write(original_content))
+            for original_path, updated_path in reversed(renamed_paths):
+                os.rename(updated_path, original_path)
+            raise
     for original, updated in rename_tasks:
-        if not dry_run:
-            os.rename(
-                os.path.join(album_path.path, original),
-                os.path.join(album_path.path, updated),
-            )
         if not dry_run or not quiet:
             print(f'Renamed "{original}" -> "{updated}"')
 

@@ -609,6 +609,11 @@ track:
 Use `rename-album-files -q` (or `--quiet`) to show only successful renames and
 errors. With `--dry-run --quiet`, planned renames are not printed.
 
+`rename-album-files` also renames track YAML sidecars and updates filename/path
+references in the album's `.yml` and `.yaml` files, including all media formats
+for a track. References to files skipped because of a filename collision stay
+unchanged. YAML comments and quoting are preserved; dry runs do not modify files.
+
 ## Copy Media Library Diagnostics
 
 `copy-medialib` logs its source, destination, filters, and overwrite settings

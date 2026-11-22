@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from yaml import safe_load
 
 from mediascripts.rename import rename_album_files as rename
 from mediascripts.rename.rename_album_files import update_filename
@@ -108,3 +109,77 @@ def test_quiet_cli_still_reports_invalid_album_on_stderr(
     captured = capsys.readouterr()
     assert not captured.out
     assert captured.err == f"Album path is invalid, rename operation aborted: {missing}\n"
+
+
+@pytest.mark.parametrize("yaml_extension", [".yml", ".yaml"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_rename_updates_all_media_references(
+    tmp_path: Path, yaml_extension: str, dry_run: bool,
+) -> None:
+    album = tmp_path / "data" / "Music" / "Artist" / "Album [2000]"
+    album.mkdir(parents=True)
+    stem = "Song [Official Video]"
+    for extension in (".mp3", ".flac", ".mp4"):
+        (album / f"{stem}{extension}").write_bytes(b"media")
+    original_yaml = album / f"{stem}{yaml_extension}"
+    content = (
+        "# Keep this comment\n"
+        "trackData:\n  title: Song\n"
+        "mediaFileData:\n"
+        f'  - path: "/data/Music/Artist/Album [2000]/{stem}.mp3"\n'
+        f"  - path: '{stem}.flac'\n"
+        f"  - path: ./{stem}.mp4\n"
+        f"  - path: Missing [Official Video].mp3\n"
+        f"otherReferences: ['{stem}.mp3', '{stem}.flac']\n"
+    )
+    original_yaml.write_text(content, encoding="utf-8")
+    original_yaml.chmod(0o640)
+
+    assert rename.rename_album_files(album, dry_run=dry_run, quiet=True) == 4
+
+    if dry_run:
+        assert original_yaml.read_text(encoding="utf-8") == content
+        assert sorted(path.name for path in album.iterdir()) == sorted(
+            [f"{stem}{ext}" for ext in (".mp3", ".flac", ".mp4", yaml_extension)]
+        )
+        return
+    updated_yaml = album / f"Song{yaml_extension}"
+    document = safe_load(updated_yaml.read_text(encoding="utf-8"))
+    assert [entry["path"] for entry in document["mediaFileData"]] == [
+        "/data/Music/Artist/Album [2000]/Song.mp3",
+        "Song.flac",
+        "./Song.mp4",
+        "Missing [Official Video].mp3",
+    ]
+    assert document["otherReferences"] == ["Song.mp3", "Song.flac"]
+    assert document["trackData"]["title"] == "Song"
+    assert "# Keep this comment" in updated_yaml.read_text(encoding="utf-8")
+    assert updated_yaml.stat().st_mode & 0o777 == 0o640
+    assert not original_yaml.exists()
+    for extension in (".mp3", ".flac", ".mp4"):
+        assert (album / f"Song{extension}").read_bytes() == b"media"
+
+
+def test_rename_updates_unchanged_yaml_and_preserves_collision_references(tmp_path: Path) -> None:
+    album = tmp_path / "data" / "Music" / "Artist" / "Album [2000]"
+    album.mkdir(parents=True)
+    (album / "Song [Official Video].mp3").touch()
+    (album / "Song.mp3").write_bytes(b"keep")
+    (album / "Song [Official Video].flac").touch()
+    yaml_path = album / "Song.yml"
+    yaml_path.write_text(
+        "mediaFileData:\n"
+        "  - path: Song [Official Video].mp3\n"
+        "  - path: Song [Official Video].flac\n",
+        encoding="utf-8",
+    )
+
+    assert rename.rename_album_files(album, quiet=True) == 1
+
+    assert safe_load(yaml_path.read_text(encoding="utf-8")) == {
+        "mediaFileData": [
+            {"path": "Song [Official Video].mp3"},
+            {"path": "Song.flac"},
+        ]
+    }
+    assert (album / "Song.mp3").read_bytes() == b"keep"
