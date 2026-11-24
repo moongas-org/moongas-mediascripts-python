@@ -9,6 +9,7 @@
             "source.organizeImports": "never"
         }
     },
+    "files.associations": { "*.inc": "shellscript" },
     "files.exclude": {
         "**/__pycache__": true,
         "**/*.pyc": true,
@@ -70,6 +71,7 @@
         "filething",
         "followlinks",
         "mediafile",
+        "MEDIALIB",
         "mediascan",
         "mediascripts",
         "MOONGAS",

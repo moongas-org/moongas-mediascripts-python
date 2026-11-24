@@ -555,7 +555,7 @@ The `mediascripts` package installs a console script named `mediascripts` so it 
 
 ```bash
 $ mediascripts --h
-usage: mediascripts [-h] [--list] [--create-script-symlinks]
+usage: mediascripts [-h] [--list] [--create-script-symlinks] [--remove-script-symlinks]
 
 Utility for media* console script entry points.
 
@@ -563,9 +563,21 @@ options:
   -h, --help            show this help message and exit
   --list                list all media* console script entry points, grouped by scripts subdirectory
   --create-script-symlinks
-                        create hyphenated symlinks in the current directory to every console entry script and every shell script in
-                        scripts/shell
+                        create hyphenated symlinks in the current directory to every console entry script and supported shell script
+  --remove-script-symlinks
+                        remove symlinks to files in the current directory except data and .venv
 ```
+
+Shell symlinks are created from the packaged script list, not obsolete files
+left in an installation or build directory. Existing obsolete links in the
+collection directory are not automatically removed.
+
+Run `mediascripts --remove-script-symlinks` from the collection directory to
+remove its immediate symlinks to regular files, including hidden symlinks,
+except those named `data` or `.venv`. Symlinks to directories, dangling links
+and links to special files are preserved. It does not recurse or remove regular
+files, directories, or symlink targets. This action cannot be combined with
+`--list` or `--create-script-symlinks`.
 
 The `--list` option may be used to list all console scripts and shell scripts installed by any `media*` packages.
 ```bash
@@ -631,6 +643,20 @@ Use `-q` / `--quiet` to suppress per-file skip messages (including identical,
 newer, existing, excluded, and already-converted files). The startup settings
 line reports `quiet=True` or `quiet=False`. Copy/delete actions, dry-run
 previews, summary counts, warnings, and errors remain visible.
+
+The shell wrappers `copy-{album-yaml,all-yaml,artist-yaml,lyrics,media}-files`
+copy from the active `$MOONGAS_COLLECTION_ROOTDIR/data/Music` to the `data`
+directory of the named destination collection. The required collection name is
+case-insensitive: `demo` selects `$MOONGAS_COLLECTION_DEMO`, and `LoCaL` selects
+`$MOONGAS_COLLECTION_LOCAL`. Other names use the corresponding uppercase
+`MOONGAS_COLLECTION_<NAME>` environment variable; names may contain letters,
+digits, and underscores. The source and destination variables must be exported,
+set, and nonempty. Additional options are forwarded to `copy-medialib`; for
+example, `copy-artist-yaml-files demo --dry-run` previews the copy. After renaming the scripts,
+rerun `mediascripts --create-script-symlinks` to create the new command links.
+To remove obsolete directional links first, use `--remove-script-symlinks`;
+note that it removes all unprotected links to existing regular files in the
+current directory, not just script links. Dangling links must be removed separately.
 
 All `copy_*.sh` wrappers require `COPY_MEDIALIB_EXCLUDE_KEYWORDS` and pass its
 nonempty newline-separated entries to `--exclude-keywords`. An empty variable

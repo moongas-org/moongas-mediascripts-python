@@ -131,7 +131,7 @@ Repository = "https://github.com/moongas-org/moongas-mediasripts-python.git"
 Changelog = "https://github.com/moongas-org/moongas-mediasripts-python/blob/master/CHANGELOG.md"
 
 [tool.setuptools.package-data]
-mediascripts = ['py.typed', 'shell/*.sh']
+mediascripts = ['py.typed', 'shell/*.sh', 'shell/*.inc', 'shell/scripts.txt']
 
 [tool.setuptools.packages.find]
 where = ["src"]

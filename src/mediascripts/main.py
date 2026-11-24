@@ -4,6 +4,7 @@ import argparse
 import importlib.metadata
 import logging
 import shutil
+import stat
 from pathlib import Path
 
 from mediascripts import console
@@ -41,9 +42,15 @@ def create_script_symlinks(dest_dir: Path):
         dest.symlink_to(command_path)
         logger.info("%s -> %s", dest.name, command_path)
 
-    # Symlink every shell script in scripts/shell with hyphenated name
+    # The manifest excludes obsolete files left in build or installation directories.
     if shell_dir.is_dir():
-        for shell_script in sorted(shell_dir.glob("*.sh")):
+        names = (shell_dir / "scripts.txt").read_text(encoding="utf-8").splitlines()
+        for filename in sorted(names):
+            if Path(filename).name != filename or not filename.endswith(".sh"):
+                raise ValueError(f"Invalid shell script name in manifest: {filename!r}")
+            shell_script = shell_dir / filename
+            if not shell_script.is_file():
+                raise FileNotFoundError(f"Shell script listed in manifest is missing: {shell_script}")
             name = shell_script.stem.replace("_", "-")
             dest = dest_dir / name
             if dest.is_symlink():
@@ -59,6 +66,20 @@ def create_script_symlinks(dest_dir: Path):
             logger.info("%s -> %s", dest.name, shell_script)
     else:
         logger.warning("shell script directory not found: %s", shell_dir)
+
+
+def remove_script_symlinks(dest_dir: Path) -> None:
+    for path in sorted(dest_dir.iterdir()):
+        if path.name in {"data", ".venv"} or not path.is_symlink():
+            continue
+        try:
+            target_mode = path.stat().st_mode
+        except FileNotFoundError:
+            logger.warning("keeping dangling symlink %s", path.name)
+            continue
+        if stat.S_ISREG(target_mode):
+            path.unlink()
+            logger.info("removed symlink %s", path.name)
 
 
 def list_media_scripts():
@@ -104,13 +125,22 @@ def main():
         "--create-script-symlinks",
         action="store_true",
         help="create hyphenated symlinks in the current directory to every console entry script "
-        "and every shell script in scripts/shell",
+        "and supported shell script",
+    )
+    parser.add_argument(
+        "--remove-script-symlinks",
+        action="store_true",
+        help="remove symlinks to files in the current directory except data and .venv",
     )
     args = parser.parse_args()
+    if args.remove_script_symlinks and (args.list or args.create_script_symlinks):
+        parser.error("--remove-script-symlinks cannot be combined with --list or --create-script-symlinks")
     if args.list:
         list_media_scripts()
     elif args.create_script_symlinks:
         create_script_symlinks(Path.cwd())
+    elif args.remove_script_symlinks:
+        remove_script_symlinks(Path.cwd())
     else:
         parser.print_help()
 
