@@ -917,7 +917,7 @@ Also runs as `python -m mediascripts.track.track_yaml.track_yaml_auto_populate`.
 
 ## Create Track YAML from a Request File
 
-`track-yaml-auto-populate-from-file` reads a UTF-8 text file in order, ignoring
+`track-yaml-auto-create` reads a UTF-8 text file in order, ignoring
 blank lines. `--file` defaults to `$MOONGAS_COLLECTION_ROOTDIR/todo.txt`;
 specify `--file` to use another input file. Each non-empty line normally
 describes one desired track. The word `album` (case-insensitive) requests the
@@ -938,21 +938,35 @@ Install the LLM extras (`uv sync --extra llm`) and configure the same
 Existing GitHub Models environment-variable fallbacks also apply.
 
 ```bash
-track-yaml-auto-populate-from-file
-track-yaml-auto-populate-from-file --file "/home/brett/Git/moongas.org/moongas-collection-local/todo.txt"
-track-yaml-auto-populate-from-file --file "/path/to/todo.txt" --dry-run
-track-yaml-auto-populate-from-file --file "/path/to/todo.txt" --dir "/path/to/Music" --count 10 --sleep 5
-track-yaml-auto-populate-from-file --file "/path/to/todo.txt" --llm=false
-track-yaml-auto-populate-from-file --file "/path/to/todo.txt" --force
+track-yaml-auto-create
+track-yaml-auto-create --file "/home/brett/Git/moongas.org/moongas-collection-local/todo.txt"
+track-yaml-auto-create --file "/path/to/todo.txt" --dry-run
+track-yaml-auto-create --file "/path/to/todo.txt" --count 10 --sleep 5
+track-yaml-auto-create --dir "$MOONGAS_COLLECTION_ROOTDIR/data/Music/Artist"
+track-yaml-auto-create --dir "$MOONGAS_COLLECTION_ROOTDIR/data/Music/Artist/Album [1995]"
+track-yaml-auto-create --file "/path/to/todo.txt" --llm=false
+track-yaml-auto-create --file "/path/to/todo.txt" --force
 ```
+
+After updating the package, regenerate script symlinks with
+`mediascripts --create-script-symlinks`. Remove any previously created
+`track-yaml-auto-populate-from-file` symlink separately; creating symlinks does
+not remove obsolete names.
 
 The default destination is the first `mediaDirs` entry in
 `$MOONGAS_COLLECTION_ROOTDIR/mediascan-config.yml`, interpreted relative to the
 collection root even when it begins with `/`. For example, `mediaDirs: [/data/Music,
 /data/MusicOther]` selects `$MOONGAS_COLLECTION_ROOTDIR/data/Music`.
 A missing config or missing, empty, or invalid first entry is an error; there is
-no hard-coded directory fallback. `-d` / `--dir` overrides the parent directory
-for artist directories without requiring the config or collection-root variable.
+no hard-coded directory fallback. `--file` and `-d` / `--dir` are mutually
+exclusive. `--dir` selects an existing artist directory or an existing
+year-tagged album directory under a configured `mediaDirs` entry. It reads the
+default `todo.txt` without modifying it or its backup. Requests resolving
+outside the selected directory are warned and not written; the run reports
+failure. Album directories inside a selected artist directory may be created.
+In file mode, matching existing artist and album directories are reused across
+all configured media directories; if none exists, the first is used. Ambiguous
+matches are errors.
 The command creates
 missing artist and album directories, using the release's album artist for the
 artist directory (including compilations). Output follows mediascan's album
@@ -1053,7 +1067,7 @@ Failed, unprocessed, and blank lines remain, preserving their order, whitespace,
 line endings, and UTF-8 BOM if present. Each failed line is logged as a warning with its
 original source line number, and later lines are still attempted. Progress is
 saved after each successful line so an interruption leaves pending work intact.
-`--dry-run`, `--llm=false`, and `--count 0` leave both the input and its backup
+`--dir`, `--dry-run`, `--llm=false`, and `--count 0` leave both the input and its backup
 untouched. Backup failures prevent processing; input-update failures or detected
 input edits abort the batch rather than discarding pending work. Do not edit the
 input or run concurrent writers while processing. Symlink input/backup files are
@@ -1074,7 +1088,7 @@ searches to MusicBrainz; artist-only requests also query ListenBrainz, and URLs
 are looked up on their respective providers. Dry runs still make these requests and may incur
 provider charges.
 Also runs as
-`python -m mediascripts.track.track_yaml.track_yaml_auto_populate_from_file`.
+`python -m mediascripts.track.track_yaml.track_yaml_auto_create`.
 
 ## Compare Track YAML with MP3 Tags
 

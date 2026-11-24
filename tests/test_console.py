@@ -18,6 +18,35 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["scripts"]
 
 
+def test_track_yaml_auto_create_replaces_old_entry_point() -> None:
+    assert SCRIPTS["track-yaml-auto-create"] == "mediascripts.console:track_yaml_auto_create"
+    assert "track-yaml-auto-populate-from-file" not in SCRIPTS
+    assert console.track_yaml_auto_create.module == "mediascripts.track.track_yaml.track_yaml_auto_create"
+
+
+def test_create_script_symlinks_uses_track_yaml_auto_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "bin" / "track-yaml-auto-create"
+    executable.parent.mkdir()
+    executable.touch()
+    destination = tmp_path / "collection"
+    destination.mkdir()
+    entry = SimpleNamespace(
+        name="track-yaml-auto-create",
+        value=SCRIPTS["track-yaml-auto-create"],
+        dist=SimpleNamespace(name="mediascripts"),
+    )
+    monkeypatch.setattr(scripts_main, "__file__", str(tmp_path / "main.py"))
+    monkeypatch.setattr(scripts_main.importlib.metadata, "entry_points", lambda **_: [entry])
+    monkeypatch.setattr(scripts_main.shutil, "which", lambda name: str(executable) if name == entry.name else None)
+
+    scripts_main.create_script_symlinks(destination)
+
+    assert (destination / "track-yaml-auto-create").resolve() == executable
+    assert not (destination / "track-yaml-auto-populate-from-file").exists()
+
+
 @pytest.mark.parametrize(("name", "entry_point"), SCRIPTS.items())
 def test_every_console_script_routes_to_its_original_main(
     name: str, entry_point: str, monkeypatch: pytest.MonkeyPatch,

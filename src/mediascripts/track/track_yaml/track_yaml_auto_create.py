@@ -573,14 +573,30 @@ def existing_directory(parent: Path, name: str, year: int | None = None) -> Path
     return None
 
 
-def album_directory(destination: Path, artist: str, album: str, year: int) -> Path:
+def album_directory(
+    destination: Path, artist: str, album: str, year: int, roots: list[Path] | None = None,
+) -> Path:
     artist_name = path_component(artist)
     album_title = path_component(album)
     album_name = f"{album_title} [{year}]"
     if not album_pattern.fullmatch(album_name):
         raise ValueError(f"Invalid mediascan album name: {album_name}")
-    artist_dir = existing_directory(destination, artist) or destination / artist_name
-    return existing_directory(artist_dir, album, year) or artist_dir / album_name
+    artist_dirs = [
+        artist_dir for root in (roots if roots is not None else [destination])
+        if (artist_dir := existing_directory(root, artist)) is not None
+    ]
+    albums = [
+        album_dir for artist_dir in artist_dirs
+        if (album_dir := existing_directory(artist_dir, album, year)) is not None
+    ]
+    if len(albums) > 1:
+        raise ValueError(f"Ambiguous existing album directories for {album!r}: {', '.join(map(str, albums))}")
+    if albums:
+        return albums[0]
+    if len(artist_dirs) > 1:
+        raise ValueError(f"Ambiguous existing artist directories for {artist!r}: {', '.join(map(str, artist_dirs))}")
+    artist_dir = artist_dirs[0] if artist_dirs else destination / artist_name
+    return artist_dir / album_name
 
 
 def dump_yaml(document: Mapping[str, object]) -> str:
@@ -593,6 +609,7 @@ def dump_yaml(document: Mapping[str, object]) -> str:
 
 def prepare_tracks(
     release: Mapping[str, object], recording_id: str | None, destination: Path,
+    roots: list[Path] | None = None,
 ) -> list[tuple[Path, dict[str, object]]]:
     album = text_field(release, "title")
     date = text_field(release, "date")
@@ -600,7 +617,7 @@ def prepare_tracks(
         raise ValueError("Release date must start with a four-digit year")
     year = int(date[:4])
     albumartist = artist_credit(release.get("artist-credit"))
-    album_dir = album_directory(destination, albumartist, album, year)
+    album_dir = album_directory(destination, albumartist, album, year, roots)
     media = mapping_list(release.get("media"), "release media")
     logger.info(
         "Building track YAML: albumartist=%r, album=%r, year=%d, discs=%d, directory=%s",
@@ -686,9 +703,31 @@ def collection_roots(destination: Path) -> list[Path]:
         if not relative.parts or ".." in relative.parts:
             raise ValueError(f"{config_path}: mediaDirs entries must name directories within the collection")
         path = Path(root) / relative
-        if path not in roots:
+        if all(path.resolve() != existing.resolve() for existing in roots):
             roots.append(path)
     return roots
+
+
+def scoped_destination(directory: Path, roots: list[Path]) -> tuple[Path, Path]:
+    if not directory.is_dir():
+        raise ValueError(f"Selected artist or album directory does not exist: {directory}")
+    target = directory.resolve()
+    matches: list[tuple[Path, Path]] = []
+    for root in roots:
+        resolved_root = root.resolve()
+        if not target.is_relative_to(resolved_root):
+            continue
+        parts = target.relative_to(resolved_root).parts
+        if len(parts) == 1 or (
+            len(parts) == 2 and re.fullmatch(r".+\s*\[\d{4}\]", parts[1])
+        ):
+            matches.append((root, target))
+    if len(matches) != 1:
+        raise ValueError(
+            f"Selected directory must be an artist or year-tagged album directory "
+            f"under exactly one configured mediaDirs entry: {directory}"
+        )
+    return matches[0]
 
 
 def track_key(artist: str, title: str) -> tuple[str, str]:
@@ -922,18 +961,27 @@ def default_destination() -> Path:
 def main_loop(
     specific_file: Path, specific_dir: Path | None = None, sleep_between_files: int = 30,
     llm_enabled: bool = True, force: bool = False, dry_run: bool = False, count: int | None = None,
+    *, target_dir: Path | None = None,
 ) -> bool:
     started = time.perf_counter()
     if sleep_between_files < 0 or (count is not None and count < 0):
         raise ValueError("sleep and count must be non-negative")
     if not specific_file.is_file():
         raise ValueError(f"Input file does not exist: {specific_file}")
+    use_collection_roots = specific_dir is None
     if specific_dir is None:
         specific_dir = default_destination()
     else:
         logger.info("Using explicit destination: %s", specific_dir)
     if specific_dir.exists() and not specific_dir.is_dir():
         raise ValueError(f"Destination is not a directory: {specific_dir}")
+    roots = collection_roots(specific_dir) if use_collection_roots else [specific_dir]
+    scope: Path | None = None
+    if target_dir is not None:
+        if not use_collection_roots:
+            raise ValueError("A scoped directory cannot be combined with a destination override")
+        specific_dir, scope = scoped_destination(target_dir, roots)
+        logger.info("Restricting output to %s; request file will not be modified", scope)
     logger.info(
         "Starting batch: input=%s, destination=%s, llm=%s, model=%s, force=%s, dry_run=%s, count=%s, sleep=%ds",
         specific_file, specific_dir, llm_enabled, MODEL_NAME, force, dry_run,
@@ -946,7 +994,7 @@ def main_loop(
     logger.info("Reading UTF-8 request file: %s", specific_file)
     input_content = specific_file.read_bytes()
     lines = input_content.decode("utf-8-sig").splitlines(keepends=True)
-    update_input = llm_enabled and not dry_run and count != 0
+    update_input = llm_enabled and not dry_run and count != 0 and scope is None
     if update_input:
         if specific_file.is_symlink():
             raise ValueError(f"Refusing a symlink input file: {specific_file}")
@@ -981,8 +1029,10 @@ def main_loop(
                 logger.info("Initializing OpenAI-compatible client")
                 client = get_client()
             release, recording_id, genre = resolve_request(text, client, catalogue)
-            prepared = prepare_tracks(release, recording_id, specific_dir)
+            prepared = prepare_tracks(release, recording_id, specific_dir, [specific_dir] if scope else roots)
             target = prepared[0][0]
+            if scope is not None and not target.resolve().is_relative_to(scope):
+                raise ValueError(f"Resolved output {target} is outside selected directory {scope}")
             alternate = target.with_suffix(".yaml")
             force_existing = force and (
                 target.exists() or target.is_symlink() or alternate.exists() or alternate.is_symlink()
@@ -997,7 +1047,8 @@ def main_loop(
                 logger.info("Skipping track already present in collection: %s", existing)
             else:
                 tracks = format_tracks(prepared, genre)
-                save_tracks(tracks, specific_dir, force, dry_run)
+                output_root = scope if scope is not None else target.parent.parent.parent
+                save_tracks(tracks, output_root, force, dry_run)
                 if existing_index is not None and not dry_run:
                     for path, _ in tracks:
                         actual = path if path.exists() else path.with_suffix(".yaml")
@@ -1039,13 +1090,14 @@ def main_loop(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    targets = parser.add_mutually_exclusive_group()
+    targets.add_argument(
         "--file", type=Path,
         help="UTF-8 request file (default: $MOONGAS_COLLECTION_ROOTDIR/todo.txt).",
     )
-    parser.add_argument(
+    targets.add_argument(
         "-d", "--dir", type=Path,
-        help="Artist-directory parent (default: first mediaDirs entry in the collection's mediascan-config.yml).",
+        help="Existing artist or album directory in a configured mediaDirs entry; read the default request file without modifying it.",
     )
     parser.add_argument("--sleep", type=int, default=30, help="Seconds between input lines (default: 30).")
     parser.add_argument("--llm", type=parse_boolean, default=True, metavar="true|false", help="False lists input without requests or writes.")
@@ -1071,7 +1123,7 @@ def main() -> int:
             input_file = Path(root) / "todo.txt"
             logger.info("Using default input file: %s", input_file)
         return 0 if main_loop(
-            input_file, args.dir, args.sleep, args.llm, args.force, args.dry_run, args.count,
+            input_file, None, args.sleep, args.llm, args.force, args.dry_run, args.count, target_dir=args.dir,
         ) else 1
     except (APIError, *YAML_ERRORS) as error:
         logger.error("Batch aborted: %s", error, exc_info=logger.isEnabledFor(logging.DEBUG))

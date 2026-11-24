@@ -4,7 +4,7 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Protocol, TypedDict, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 import requests
@@ -211,7 +211,13 @@ def test_acoustid_isrcs_create_streaming_entry_when_track_ids_are_absent(
         "apiData": RAW_API_RESPONSE,
         "isrc": "USABC9500001",
     }
-    assert document["mediaFileData"][0]["fpcalcData"]["fingerprint"] == "example"
+    media_file_data = document["mediaFileData"]
+    assert spotify.is_list(media_file_data)
+    media_file = media_file_data[0]
+    assert spotify.is_mapping(media_file)
+    fpcalc_data = media_file["fpcalcData"]
+    assert spotify.is_mapping(fpcalc_data)
+    assert fpcalc_data["fingerprint"] == "example"
 
 
 def test_dry_run_retains_proposal_and_does_not_touch_source_or_backup(
@@ -381,10 +387,12 @@ def test_isrc_lookup_prefers_us_codes_before_aus_codes(
 
     assert spotify.run(specific_file=track)
 
-    api[1].assert_has_calls([
-        (("USABC9500001", "access-token"), {}),
-        (("AUSABC9500001", "access-token"), {}),
-    ])
+    api[1].assert_has_calls(
+        [
+            call("USABC9500001", "access-token"),
+            call("AUSABC9500001", "access-token"),
+        ]
+    )
 
 
 def test_existing_complete_entry_skips_unless_forced(track: Path, api: tuple[MagicMock, MagicMock]) -> None:
@@ -522,10 +530,12 @@ def test_scalar_track_id_data_uses_first_successful_isrc(
     assert spotify.run(specific_file=track)
     identifiers = entries(load(track))
     assert spotify_entry(identifiers[0])["trackId"] == "track-id"
-    api[1].assert_has_calls([
-        (("USABC9500002", "access-token"), {}),
-        (("USABC9500001", "access-token"), {}),
-    ])
+    api[1].assert_has_calls(
+        [
+            call("USABC9500002", "access-token"),
+            call("USABC9500001", "access-token"),
+        ]
+    )
 
 
 @pytest.mark.parametrize("status", [401, 429, 503])

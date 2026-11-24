@@ -2,7 +2,7 @@ import logging
 import shlex
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,6 +23,15 @@ STREAMING_ENTRY = (
     "        isrc: USABC9500001\n"
 )
 COMPLETE = CORE + "trackIdData:\n  streamingData:\n      - " + STREAMING_ENTRY
+
+
+class _ID3Writer(Protocol):
+    def add(self, frame: TCON) -> None: ...
+    def save(self, filething: Path) -> None: ...
+
+
+def _new_id3() -> _ID3Writer:
+    return cast(_ID3Writer, ID3())
 
 
 @pytest.fixture(autouse=True)
@@ -248,7 +257,13 @@ def test_model_numeric_service_ids_are_quoted_without_losing_digits(
         assert not track.with_name(track.name + ".bak").exists()
     else:
         document = validator.validate_track_yaml_content(track.read_text())
-        assert document["trackIdData"]["streamingData"][0]["trackId"] == digits
+        identifiers = document["trackIdData"]
+        assert validator.is_mapping(identifiers)
+        streaming_data = identifiers["streamingData"]
+        assert validator.is_list(streaming_data)
+        first_streaming_entry = streaming_data[0]
+        assert validator.is_mapping(first_streaming_entry)
+        assert first_streaming_entry["trackId"] == digits
         assert track.with_name(track.name + ".bak").read_text() == CORE
 
 
@@ -497,7 +512,7 @@ def test_genre_fallback_uses_neighboring_tracks(
     (track.parent / "02 - Neighbor.yml").write_text("trackData:\n  genre: Jazz\n", encoding="utf-8")
     other_album = track.parent.parent / "Other [2000]"
     other_album.mkdir()
-    media = ID3()
+    media = _new_id3()
     media.add(TCON(encoding=3, text=["Jazz"]))
     media.save(other_album / "03 - Neighbor.mp3")
     with caplog.at_level(logging.INFO):
