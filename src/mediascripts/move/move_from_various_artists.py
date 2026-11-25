@@ -535,6 +535,47 @@ def move_track(
     return target_yaml
 
 
+def cleanup_source_album(
+    source: Path, track: Path, *, dry_run: bool = False,
+    previewed_tracks: set[tuple[Path, str]] | None = None,
+) -> None:
+    relative = track.relative_to(source)
+    if len(relative.parts) < 2:
+        return
+    album = source / relative.parts[0]
+    if album.is_symlink():
+        logger.info("[%s] Keeping source album: album directory is a symlink", album)
+        return
+    files: list[Path] = []
+    directories: list[Path] = []
+    for root, children, filenames in os.walk(album, topdown=False, followlinks=False, onerror=report_walk_error):
+        directory = Path(root)
+        if any((directory / child).is_symlink() for child in children):
+            logger.info("[%s] Keeping source album: contains a directory symlink", album)
+            return
+        directories.append(directory)
+        for filename in filenames:
+            path = directory / filename
+            if dry_run and previewed_tracks is not None and (directory, path.stem) in previewed_tracks:
+                continue
+            if (path.suffix.lower() in MEDIA_EXTENSIONS
+                    or (path.suffix.lower() in YAML_SUFFIXES and path.stem.casefold() not in RESERVED_STEMS)):
+                logger.info("[%s] Keeping source album: track or media file remains: %s", album, path)
+                return
+            files.append(path)
+    if dry_run:
+        logger.info(
+            "[dry-run] Would remove source album directory %s and %d leftover file(s); no tracks or media would remain",
+            album, len(files),
+        )
+        return
+    logger.info("[%s] Removing source album directory and %d leftover file(s); no tracks or media remain", album, len(files))
+    for path in files:
+        path.unlink()
+    for directory in directories:
+        directory.rmdir()
+
+
 def move_from_various_artists(
     data_root: Path, *, dry_run: bool = False, count: int | None = None, sleep: float = MIN_SLEEP,
     max_attempts: int = 6, retry_delay: float = 10.0, max_retry_delay: float = MAX_RETRY_DELAY,
@@ -582,11 +623,16 @@ def move_from_various_artists(
     processed = 0
     attempted = 0
     skipped = 0
+    previewed_tracks: set[tuple[Path, str]] = set()
     for source in sources:
-        for path in iter_collection_files(source, album_directories_only=False):
+        # Snapshot before moving: cleanup can remove directories still queued by os.walk.
+        paths = list(iter_collection_files(source, album_directories_only=False))
+        for path in paths:
             if path.suffix.lower() not in (*MEDIA_EXTENSIONS, *YAML_SUFFIXES):
                 continue
             if path.stem.casefold() in RESERVED_STEMS:
+                continue
+            if not path.is_file():
                 continue
             key = (path.parent, path.stem)
             if key in seen:
@@ -614,6 +660,16 @@ def move_from_various_artists(
                 )
                 raise
             processed += 1
+            if dry_run:
+                previewed_tracks.add(key)
+            try:
+                cleanup_source_album(source, path, dry_run=dry_run, previewed_tracks=previewed_tracks)
+            except OSError:
+                logger.error(
+                    "[%s] Track move completed, but source album cleanup failed; destination files are retained",
+                    path,
+                )
+                raise
             logger.info(
                 "[%s] %s track in %.2fs; completed=%d skipped=%d",
                 path, "Previewed" if dry_run else "Moved", time.perf_counter() - started, processed, skipped,

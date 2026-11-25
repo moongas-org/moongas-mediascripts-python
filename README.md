@@ -634,6 +634,19 @@ unchanged. YAML comments and quoting are preserved; dry runs do not modify files
 Straight and curly double quotation marks in filenames become single quotes,
 which avoids invalid double-quote characters on NTFS.
 
+## Remove Empty Collection Directories
+
+`remove-empty-directories` (shell source: `remove_empty_directories.sh`) removes
+empty directories recursively under `$MOONGAS_COLLECTION_ROOTDIR/data`, deepest
+first, including parents that become empty. It prints each removed directory.
+The data root, all files (including hidden files), and symlinks are preserved.
+Library directory symlinks are followed, so empty directories inside their
+targets are also removed. Missing configuration or a nonexistent data directory
+is an error; it never falls back to cleaning the current working directory.
+
+Run `mediascripts --create-script-symlinks` in the collection directory after
+installing the updated package to create the `remove-empty-directories` helper.
+
 ## Move Tracks Out of Various Artists
 
 `move-from-various-artists` attempts to move **all identifiable tracks by default**
@@ -656,8 +669,8 @@ and previews moves and YAML changes without writing anything. `-c` / `--count`
 optionally limits successful moves (or dry-run previews); the default is unlimited.
 Skipped tracks do not consume the limit, and 0 processes nothing. Use `--count 1`
 to stop after one successful move. Each discovered track is attempted once;
-unidentifiable or colliding tracks and shared album metadata/artwork are left in
-place rather than retried indefinitely. `--sleep` sets the minimum
+unidentifiable or colliding tracks are left in place rather than retried
+indefinitely. `--sleep` sets the minimum
 seconds between MusicBrainz API requests, including retries (default and minimum:
 1.01). Local
 identification uses track YAML, embedded artist tags, then an `Artist - Title`
@@ -736,8 +749,16 @@ metadata with the original name and year. Equivalent edition-labelled album
 names are corrected; unrelated album names are never overwritten. When correcting
 a different release year, edition-specific month/day values are removed;
 otherwise existing release dates and other album fields are preserved.
-Shared source album metadata/artwork and
-empty source directories are left untouched. Existing destination tracks are
+After a successful move, the source album directory is removed if no track YAML
+or media files remain anywhere inside it. Leftover album metadata, artwork,
+backups and other non-track files in that album are deleted too. If any track
+or media remains (including in disc subdirectories), the album is kept.
+Dry runs preview this cleanup without deleting anything. Album-directory
+symlinks and albums containing directory symlinks are kept to avoid deleting
+unrelated targets; library symlinks above the album continue to be supported.
+The `Various Artists` directory itself is never removed. Cleanup failures are
+reported and stop the run, but do not undo an already completed track move.
+Existing destination tracks are
 never overwritten. Originals are removed only after destination files and YAML
 have been written; filesystem errors trigger rollback. Embedded media tags are
 not rewritten (the media file's own metadata describes the original file);

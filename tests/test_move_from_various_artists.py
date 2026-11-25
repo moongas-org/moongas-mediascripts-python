@@ -702,6 +702,134 @@ def test_api_default_processes_all_tracks(source: Path, catalogue: MagicMock, dr
     assert catalogue.get.call_count == 4
     assert source.exists() == dry_run
     assert sibling.exists() == dry_run
+    assert source.parent.exists() == dry_run
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_last_track_removes_source_album_and_leftover_files(
+    source: Path, catalogue: MagicMock, dry_run: bool, caplog: pytest.LogCaptureFixture,
+) -> None:
+    source.with_suffix(".txt").write_text("lyrics")
+    (source.parent / "album.yml.bak").write_text("old metadata")
+    (source.parent / "artwork").mkdir()
+    (source.parent / "artwork" / "back.jpg").write_bytes(b"artwork")
+    original_album = (source.parent / "album.yml").read_bytes()
+    various = source.parent.parent
+    with caplog.at_level(logging.INFO):
+        assert move.move_from_various_artists(data_root(source), dry_run=dry_run)
+    assert various.is_dir()
+    if dry_run:
+        assert source.exists()
+        assert (source.parent / "album.yml").read_bytes() == original_album
+        assert "[dry-run] Would remove source album directory" in caplog.text
+    else:
+        assert not source.parent.exists()
+        assert target(source).exists()
+        assert target(source).with_suffix(".txt").read_text() == "lyrics"
+        assert "Removing source album directory" in caplog.text
+
+
+@pytest.mark.parametrize("remaining", ["02 - Other.yml", "02 - Other.YAML", "02 - Other.MP3", "album.flac"])
+def test_source_album_kept_when_track_or_media_remains(
+    source: Path, catalogue: MagicMock, remaining: str,
+) -> None:
+    other = source.parent / remaining
+    other.write_text("unidentified file")
+    assert move.move_from_various_artists(data_root(source), count=1)
+    assert other.exists()
+    assert (source.parent / "album.yml").exists()
+    assert (source.parent / "cover.jpg").exists()
+
+
+def test_cleanup_after_last_track_dry_run_uses_all_previewed_moves(
+    source: Path, catalogue: MagicMock, caplog: pytest.LogCaptureFixture,
+) -> None:
+    source.with_name("02 - Track.yml").write_bytes(source.read_bytes())
+    with caplog.at_level(logging.INFO):
+        assert move.move_from_various_artists(data_root(source), dry_run=True)
+    assert caplog.text.count("[dry-run] Would remove source album directory") == 1
+    assert "Keeping source album: track or media file remains" in caplog.text
+    assert source.exists()
+
+
+def test_cleanup_checks_other_disc_directories(source: Path, catalogue: MagicMock) -> None:
+    disc = source.parent / "Disc 2"
+    disc.mkdir()
+    other = disc / "Other.mp3"
+    other.write_bytes(b"unidentified")
+    assert move.move_from_various_artists(data_root(source), count=1)
+    assert other.exists()
+    assert (source.parent / "album.yml").exists()
+
+
+def test_cleanup_does_not_follow_artwork_directory_symlinks(source: Path, catalogue: MagicMock, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    image = outside / "cover.jpg"
+    image.write_bytes(b"keep")
+    (source.parent / "artwork").symlink_to(outside, target_is_directory=True)
+    assert move.move_from_various_artists(data_root(source))
+    assert image.read_bytes() == b"keep"
+    assert source.parent.is_dir()
+    assert (source.parent / "artwork").is_symlink()
+
+
+def test_cleanup_failure_does_not_undo_successful_move(
+    source: Path, catalogue: MagicMock, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    original_unlink = Path.unlink
+    album_yaml = source.parent / "album.yml"
+
+    def unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == album_yaml:
+            raise PermissionError("cannot clean album")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(PermissionError, match="cannot clean album"):
+        move.move_from_various_artists(data_root(source))
+    assert not source.exists()
+    assert target(source).exists()
+    assert album_yaml.exists()
+    assert "Track move completed, but source album cleanup failed" in caplog.text
+
+
+def test_cleanup_never_removes_various_artists_root(source: Path) -> None:
+    various = source.parent.parent
+    direct_track = various / "Track.yml"
+    move.cleanup_source_album(various, direct_track)
+    assert various.is_dir()
+
+
+def test_cleanup_continues_to_next_album_after_removing_nested_artwork(
+    source: Path, catalogue: MagicMock,
+) -> None:
+    (source.parent / "artwork").mkdir()
+    (source.parent / "artwork" / "back.jpg").write_bytes(b"artwork")
+    other_album = source.parent.parent / "Other Compilation [2005]"
+    other_album.mkdir()
+    other_track = other_album / "02 - Track.yml"
+    other_track.write_bytes(source.read_bytes())
+    (other_album / "album.yml").write_text("albumData: {name: Other Compilation}\n")
+    assert move.move_from_various_artists(data_root(source))
+    assert not source.parent.exists()
+    assert not other_album.exists()
+    assert target(source).exists()
+    assert (target(source).parent / other_track.name).exists()
+
+
+def test_cleanup_preserves_album_symlink(tmp_path: Path) -> None:
+    various = tmp_path / "Various Artists"
+    various.mkdir()
+    target_album = tmp_path / "external album"
+    target_album.mkdir()
+    metadata_file = target_album / "album.yml"
+    metadata_file.write_text("albumData: {}\n")
+    album_link = various / "Compilation [2005]"
+    album_link.symlink_to(target_album, target_is_directory=True)
+    move.cleanup_source_album(various, album_link / "Moved Track.yml")
+    assert album_link.is_symlink()
+    assert metadata_file.exists()
 
 
 @pytest.mark.parametrize("dry_run", [False, True])

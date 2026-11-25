@@ -6,6 +6,7 @@ copy_media_files.sh
 fpcalc_to_track_yaml.sh
 mediatest.sh
 remove_all_backup_files.sh
+remove_empty_directories.sh
 restart_local_services.sh
 restart_remote_services.sh
 scan_to_album_yaml.sh
