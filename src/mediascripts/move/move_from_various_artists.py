@@ -7,6 +7,8 @@ import os
 import re
 import shutil
 import sys
+import time
+from collections import Counter
 from collections.abc import Mapping, MutableMapping
 from copy import deepcopy
 from io import StringIO
@@ -173,18 +175,44 @@ def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, 
     )
     recordings = catalogue_items(result, "recordings")
     count = result.get("count")
+    logger.info(
+        "Recording search for artist=%r title=%r: returned %d recording(s), total=%s; "
+        "source album=%r year hint=%s (compilation album will not be reused)",
+        values["artist"], values["title"], len(recordings), count,
+        values.get("album", ""), values["year"] or "unknown",
+    )
     if type(count) is not int or count > len(recordings):
         raise ValueError("MusicBrainz recording search is incomplete; cannot choose safely")
     groups: dict[str, dict[str, object]] = {}
     candidates: list[tuple[str, str, str, str]] = []
-    for recording in recordings:
-        if (directory_name_key(str(recording.get("title", ""))) != title_key
-                or artist_key not in credited_names(recording) or recording.get("video") is True):
-            continue
+    rejected_recordings: Counter[str] = Counter()
+    examined = 0
+    for index, recording in enumerate(recordings, start=1):
+        reason = ""
+        if directory_name_key(str(recording.get("title", ""))) != title_key:
+            reason = "title mismatch"
+        elif artist_key not in credited_names(recording):
+            reason = "artist credit mismatch or multiple artists"
+        elif recording.get("video") is True:
+            reason = "video recording"
         # A same-title live/remix/demo recording is not proof of the local version.
-        if recording.get("disambiguation"):
+        elif recording.get("disambiguation"):
+            reason = "disambiguated version"
+        if reason:
+            rejected_recordings[reason] += 1
+            logger.debug(
+                "Rejected recording %s: %s; title=%r disambiguation=%r",
+                recording.get("id"), reason, recording.get("title"), recording.get("disambiguation"),
+            )
             continue
         recording_id = catalogue_id(recording)
+        examined += 1
+        logger.info(
+            "Examining recording %d/%d: id=%s title=%r first-release-date=%s; "
+            "browsing releases for this recording (still the same local track)",
+            index, len(recordings), recording_id, recording.get("title"),
+            recording.get("first-release-date", "unknown"),
+        )
         releases: list[dict[str, object]] = []
         for offset in range(0, 1000, 100):
             page = catalogue.get(
@@ -196,6 +224,10 @@ def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, 
             total = page.get("release-count")
             if type(total) is not int:
                 raise ValueError("MusicBrainz release count is missing")
+            logger.info(
+                "Recording %s releases: page offset=%d returned=%d; collected=%d/%d",
+                recording_id, offset, len(batch), len(releases), total,
+            )
             if len(releases) >= total:
                 break
             if not batch:
@@ -203,37 +235,80 @@ def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, 
         else:
             raise ValueError("Too many releases to resolve this recording safely")
         album_options: dict[str, tuple[str, str, str, str]] = {}
+        rejected_releases: Counter[str] = Counter()
         for release in releases:
             group = release.get("release-group")
-            if (release.get("status") != "Official" or artist_key not in credited_names(release)
-                    or not is_mapping(group) or group.get("primary-type") != "Album"
-                    or group.get("secondary-types")):
+            reason = ""
+            if release.get("status") != "Official":
+                reason = "not Official"
+            elif artist_key not in credited_names(release):
+                reason = "artist credit mismatch or multiple artists"
+            elif not is_mapping(group):
+                reason = "missing release group"
+            elif group.get("primary-type") != "Album":
+                reason = "not an Album"
+            elif group.get("secondary-types"):
+                reason = "secondary release type (e.g. compilation/live/remix)"
+            if reason:
+                rejected_releases[reason] += 1
+                logger.debug(
+                    "Rejected release %s title=%r: %s; release-group=%s",
+                    release.get("id"), release.get("title"), reason, group,
+                )
                 continue
+            if not is_mapping(group):
+                raise ValueError("Expected a release group mapping")
             group_id = catalogue_id(group)
             if group_id not in groups:
+                logger.info("Looking up eligible studio album release-group=%s title=%r", group_id, group.get("title"))
                 groups[group_id] = catalogue.get(f"release-group/{group_id}", inc="artist-credits")
+            else:
+                logger.debug("Reusing cached release-group=%s", group_id)
             details = groups[group_id]
             if (catalogue_id(details) != group_id or artist_key not in credited_names(details)
                     or details.get("primary-type") != "Album" or details.get("secondary-types")):
+                rejected_releases["release-group details not eligible"] += 1
                 continue
             date = details.get("first-release-date")
             title = details.get("title")
             if (not isinstance(date, str) or not re.fullmatch(r"[1-9]\d{3}(?:-\d{2}(?:-\d{2})?)?", date)
                     or not isinstance(title, str) or not title.strip()):
+                rejected_releases["missing/invalid album title or release date"] += 1
                 continue
             if year_hint is not None and int(date[:4]) > year_hint:
+                rejected_releases["album newer than source year hint"] += 1
                 continue
+            if group_id not in album_options:
+                logger.info("Eligible studio album: %r [%s] release-group=%s", title.strip(), date[:4], group_id)
             album_options[group_id] = (date, title.strip(), group_id, recording_id)
+        logger.info(
+            "Recording %s release filtering: %d release(s), %d eligible studio album group(s); rejected=%s",
+            recording_id, len(releases), len(album_options), dict(rejected_releases),
+        )
         if album_options:
             earliest = min(option[0][:4] for option in album_options.values())
-            candidates.extend(option for option in album_options.values() if option[0][:4] == earliest)
+            earliest_options = [option for option in album_options.values() if option[0][:4] == earliest]
+            candidates.extend(earliest_options)
+            logger.info(
+                "Recording %s earliest studio album year=%s; retained=%s",
+                recording_id, earliest, [option[1] for option in earliest_options],
+            )
     # Distinct recordings with different source albums need a year match to disambiguate.
     by_group = {option[2]: option for option in candidates}
+    logger.info(
+        "Recording search summary: %d examined, %d rejected (%s); %d distinct earliest studio album group(s)",
+        examined, sum(rejected_recordings.values()), dict(rejected_recordings), len(by_group),
+    )
     if len(by_group) > 1 and year_hint is not None:
         exact_year = {key: option for key, option in by_group.items() if int(option[0][:4]) == year_hint}
         if exact_year:
+            logger.info("Year hint %d narrows album groups from %d to %d", year_hint, len(by_group), len(exact_year))
             by_group = exact_year
     if len(by_group) != 1:
+        logger.warning(
+            "Unresolved album candidates: %s",
+            [{"album": option[1], "date": option[0], "release-group": option[2]} for option in by_group.values()],
+        )
         raise ValueError(f"No unambiguous original studio album found ({len(by_group)} candidates)")
     date, album, group_id, recording_id = next(iter(by_group.values()))
     logger.info(
@@ -419,6 +494,11 @@ def move_from_various_artists(
         logger.info("Track limit is zero; nothing to process")
         return False
     data_root = data_root.absolute()
+    logger.info(
+        "Move settings: root=%s dry_run=%s count=%s sleep=%.2fs; "
+        "count limits successful tracks, not MusicBrainz requests; dry-run still performs online lookups",
+        data_root, dry_run, count if count is not None else "unlimited", sleep,
+    )
     if not data_root.is_dir():
         raise NotADirectoryError(data_root)
     sources: list[Path] = []
@@ -438,8 +518,11 @@ def move_from_various_artists(
     if not sources:
         raise FileNotFoundError(f"No Various Artists directory under {data_root}")
     seen: set[tuple[Path, str]] = set()
+    logger.info("Found %d Various Artists source directory(s): %s", len(sources), [str(source) for source in sources])
     catalogue = MusicBrainz(sleep=sleep)
     processed = 0
+    attempted = 0
+    skipped = 0
     for source in sources:
         for path in iter_collection_files(source, album_directories_only=False):
             if path.suffix.lower() not in (*MEDIA_EXTENSIONS, *YAML_SUFFIXES):
@@ -450,18 +533,38 @@ def move_from_various_artists(
             if key in seen:
                 continue
             seen.add(key)
+            attempted += 1
+            started = time.perf_counter()
+            logger.info(
+                "[%s] Starting track %d; completed=%d/%s skipped=%d",
+                path, attempted, processed, count if count is not None else "unlimited", skipped,
+            )
             try:
                 move_track(path, data_root, catalogue, artist_root=source.parent, dry_run=dry_run)
             except (ValueError, YAMLError, UnicodeError, FileExistsError) as error:
-                logger.warning("[%s] Skipping track: %s", path, error)
+                skipped += 1
+                logger.warning(
+                    "[%s] Skipping track after %.2fs: %s", path, time.perf_counter() - started, error,
+                )
                 continue
+            except OSError:
+                logger.error(
+                    "[%s] Track processing failed after %.2fs; stopping run "
+                    "(completed=%d skipped=%d dry_run=%s)",
+                    path, time.perf_counter() - started, processed, skipped, dry_run,
+                )
+                raise
             processed += 1
-            logger.info("%s %d track(s)", "Previewed" if dry_run else "Moved", processed)
+            logger.info(
+                "[%s] %s track in %.2fs; completed=%d skipped=%d",
+                path, "Previewed" if dry_run else "Moved", time.perf_counter() - started, processed, skipped,
+            )
             if count is not None and processed >= count:
-                logger.info("Track limit reached; stopping")
+                logger.info("Track limit reached; stopping (attempted=%d completed=%d skipped=%d)", attempted, processed, skipped)
                 return True
     if processed == 0:
         logger.info("No safely identifiable, non-colliding track found")
+    logger.info("Run complete: attempted=%d completed=%d skipped=%d dry_run=%s", attempted, processed, skipped, dry_run)
     return processed > 0
 
 
@@ -477,10 +580,14 @@ def main() -> int:
         "--sleep", type=sleep_seconds, default=MIN_SLEEP,
         help=f"Minimum seconds between API requests (default and minimum: {MIN_SLEEP:g}).",
     )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Include DEBUG logs and raw MusicBrainz responses.")
     args = parser.parse_args()
     if args.count < 0:
         parser.error("--count must be non-negative")
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+    )
     directory = args.dir
     if directory is None:
         root = os.environ.get("MOONGAS_COLLECTION_ROOTDIR")

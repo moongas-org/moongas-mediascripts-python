@@ -37,7 +37,10 @@ class MusicBrainz:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if self.last_request is not None:
                 delay = max(0.0, self.sleep - (time.monotonic() - self.last_request))
-                logger.debug("MusicBrainz rate-limit wait: %.2fs", delay)
+                logger.info(
+                    "MusicBrainz rate-limit wait: %.2fs (minimum request-start interval: %.2fs; attempt %d/%d)",
+                    delay, self.sleep, attempt, MAX_ATTEMPTS,
+                )
                 time.sleep(delay)
             logger.info("MusicBrainz lookup: %s (attempt %d/%d)", request.full_url, attempt, MAX_ATTEMPTS)
             self.last_request = time.monotonic()
@@ -56,15 +59,22 @@ class MusicBrainz:
                 )
                 error.close()
                 if not retryable or attempt == MAX_ATTEMPTS:
+                    logger.error(
+                        "MusicBrainz request failed: %s (%s)",
+                        request.full_url,
+                        "retry limit exhausted" if retryable else "non-retryable HTTP status",
+                    )
                     raise
                 if retry_after:
                     retry_delay = retry_after_delay(retry_after, retry_delay)
+                    logger.info("MusicBrainz Retry-After header: %r; retry backoff: %.2fs", retry_after, retry_delay)
             except (URLError, TimeoutError, ConnectionError) as error:
                 logger.warning(
                     "MusicBrainz connection failure after %.2fs (attempt %d/%d): %s",
                     time.perf_counter() - started, attempt, MAX_ATTEMPTS, error,
                 )
                 if attempt == MAX_ATTEMPTS:
+                    logger.error("MusicBrainz request failed: %s (retry limit exhausted)", request.full_url)
                     raise
             else:
                 logger.info("MusicBrainz lookup completed in %.2fs", time.perf_counter() - started)
@@ -72,7 +82,11 @@ class MusicBrainz:
                 if not is_mapping(result):
                     raise ValueError("MusicBrainz response must be a mapping")
                 return result
-            logger.warning("Retrying MusicBrainz in %.2fs", retry_delay)
+            logger.warning(
+                "Retrying MusicBrainz in %.2fs backoff; the %.2fs minimum request-start interval "
+                "is enforced separately before the next attempt",
+                retry_delay, self.sleep,
+            )
             time.sleep(retry_delay)
         raise RuntimeError("MusicBrainz retry loop exhausted unexpectedly")
 

@@ -676,6 +676,18 @@ directories and destination collisions are also reported and skipped.
 Requests are rate-limited with bounded retries; network failures stop the run
 without moving the track. No API key or LLM service is required.
 
+Logs include timestamps, settings, per-track progress, recording search counts,
+recording IDs being examined, release pagination and rejection-reason totals
+(such as compilation/live releases or mismatched artist credits). One local
+track may match multiple MusicBrainz recordings, each requiring release lookups;
+`--count` limits tracks, not API requests. Rate-limit waits are shown at INFO.
+For example, `--sleep 10` enforces at least 10 seconds between request starts;
+a logged `Retry-After` backoff of 1 second may be followed by a further pacing
+wait before the retry. Repeated HTTP 503 responses exhaust the bounded retries
+and stop the run, with the current track path and completed-track count logged.
+Use `-v` / `--verbose` for individual candidate rejection details and raw
+MusicBrainz responses. Dry runs still query MusicBrainz but never change files.
+
 Existing artist/album directories are reused using the same case-insensitive,
 punctuation-normalizing rules as `track-yaml-auto-create`. New albums use
 `Album [YYYY]` names. All same-basename media, lyrics and other sidecars move

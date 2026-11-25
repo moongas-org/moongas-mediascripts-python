@@ -1,10 +1,12 @@
 import copy
+import logging
 import sys
+from email.message import Message
 from io import BytesIO
 from pathlib import Path
 from typing import Protocol, cast
 from unittest.mock import MagicMock
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import pytest
 from mediascan.types.track.track_yaml_file_validator import is_mapping, validate_track_yaml_content
@@ -616,3 +618,104 @@ def test_catalogue_honors_sleep_interval(monkeypatch: pytest.MonkeyPatch, retry:
         assert client.get("release", query="test") == {}
     sleeper.assert_any_call(3.25)
     assert network.call_count == 2
+
+
+def test_logging_explains_recording_and_release_selection(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    responses["recording"] = {
+        "count": 2,
+        "recordings": [
+            {"id": RECORDING, "title": "Track", "artist-credit": CREDIT},
+            {"id": OTHER_GROUP, "title": "Track", "artist-credit": CREDIT, "disambiguation": "live"},
+        ],
+    }
+    with caplog.at_level(logging.DEBUG):
+        assert move.move_from_various_artists(data_root(source), dry_run=True, count=1, sleep=10)
+    for expected in (
+        "dry_run=True count=1 sleep=10.00s",
+        "count limits successful tracks, not MusicBrainz requests",
+        "dry-run still performs online lookups",
+        "Starting track 1",
+        "returned 2 recording(s), total=2",
+        "source album='Compilation' year hint=2005",
+        "Examining recording 1/2",
+        "still the same local track",
+        "collected=3/3",
+        "Eligible studio album: 'Original Album' [1995]",
+        "3 release(s), 1 eligible studio album group(s)",
+        "'secondary release type (e.g. compilation/live/remix)': 1",
+        "'not Official': 1",
+        "disambiguated version",
+        "1 examined, 1 rejected",
+        "Track limit reached; stopping (attempted=1 completed=1 skipped=0)",
+    ):
+        assert expected in caplog.text
+    assert source.exists()
+
+
+def test_logging_explains_no_eligible_albums(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    responses["release"] = {"release-count": 0, "releases": []}
+    with caplog.at_level(logging.INFO):
+        assert not move.move_from_various_artists(data_root(source), dry_run=True)
+    assert "0 release(s), 0 eligible studio album group(s)" in caplog.text
+    assert "Unresolved album candidates: []" in caplog.text
+    assert "attempted=1 completed=0 skipped=1 dry_run=True" in caplog.text
+
+
+def test_network_failure_logs_track_context_and_progress(
+    source: Path, catalogue: MagicMock, caplog: pytest.LogCaptureFixture,
+) -> None:
+    catalogue.get.side_effect = URLError("unavailable")
+    with caplog.at_level(logging.INFO), pytest.raises(URLError):
+        move.move_from_various_artists(data_root(source), dry_run=True)
+    assert f"[{source}] Track processing failed after" in caplog.text
+    assert "stopping run (completed=0 skipped=0 dry_run=True)" in caplog.text
+    assert source.exists()
+
+
+def test_retry_logging_distinguishes_backoff_from_ten_second_pacing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = 0.0
+    starts: list[float] = []
+    waits: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        nonlocal clock
+        waits.append(seconds)
+        clock += seconds
+
+    def fail_request(*_args: object, **_kwargs: object) -> None:
+        starts.append(clock)
+        headers = Message()
+        headers["Retry-After"] = "1"
+        raise HTTPError("https://musicbrainz.org/ws/2/release", 503, "Unavailable", headers, BytesIO(b""))
+
+    monkeypatch.setattr(catalogue_http.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(catalogue_http.time, "sleep", sleep)
+    monkeypatch.setattr(catalogue_http, "urlopen", fail_request)
+    with caplog.at_level(logging.INFO), pytest.raises(HTTPError):
+        catalogue_http.MusicBrainz(sleep=10).get("release", recording=RECORDING)
+
+    assert starts == [0, 10, 20, 30]
+    assert waits == [1, 9, 1, 9, 1, 9]
+    assert "Retry-After header: '1'; retry backoff: 1.00s" in caplog.text
+    assert "1.00s backoff; the 10.00s minimum request-start interval is enforced separately" in caplog.text
+    assert "rate-limit wait: 9.00s (minimum request-start interval: 10.00s; attempt 2/4)" in caplog.text
+    assert "retry limit exhausted" in caplog.text
+
+
+def test_verbose_cli_enables_debug_with_timestamps(source: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    configure = MagicMock()
+    monkeypatch.setattr(move.logging, "basicConfig", configure)
+    monkeypatch.setattr(move, "move_from_various_artists", MagicMock(return_value=True))
+    monkeypatch.setattr(sys, "argv", ["move-from-various-artists", "-v", "--dir", str(data_root(source))])
+    assert move.main() == 0
+    configure.assert_called_once_with(
+        level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+    )
