@@ -420,6 +420,107 @@ def install_directory_lookup(
     return client, network
 
 
+@pytest.mark.parametrize("failure", ["rejection", "empty", "wrong-year"])
+def test_directory_broadens_album_search_after_no_match(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, failure: str,
+) -> None:
+    album = tmp_path / "Paul McCartney/Live in Glasgow [1979]"
+    album.mkdir(parents=True)
+    credit: list[dict[str, object]] = [{"name": "Paul McCartney"}]
+    live_release: dict[str, object] = {
+        **release, "title": "Glasgow 1979", "date": "1979-12-17", "artist-credit": credit,
+    }
+    candidate: dict[str, object] = {"id": RELEASE_ID, "title": "Glasgow 1979", "date": "1979"}
+    initial = {"releases": [] if failure == "empty" else [
+        {**candidate, "date": "2000" if failure == "wrong-year" else "1979"},
+    ]}
+    client = model_client(*(
+        ["error: No convincing match exists.\n"] if failure == "rejection" else []
+    ), "option: 1\ngenre: Classic Rock\n")
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, client))
+    network = MagicMock(side_effect=[
+        BytesIO(json.dumps(initial).encode()),
+        BytesIO(json.dumps({"releases": [candidate]}).encode()),
+        BytesIO(json.dumps(live_release).encode()),
+    ])
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    monkeypatch.setattr(populate.time, "sleep", MagicMock())
+
+    assert populate.directory_loop(album)
+    queries: list[str] = []
+    for call in network.call_args_list[:2]:
+        request = call.args[0]
+        assert isinstance(request, Request)
+        queries.append(parse_qs(urlsplit(request.full_url).query)["query"][0])
+    assert queries == [
+        'artist:"Paul McCartney" AND release:"Live in Glasgow"',
+        'artist:"Paul McCartney" AND release:"glasgow"',
+    ]
+    assert "broadening to key title tokens" in caplog.text
+    assert (album / "01 - First.yml").is_file()
+    assert not (album.parent / "Glasgow 1979 [1979]").exists()
+
+
+@pytest.mark.parametrize("title", ["Live in Glasgow", "Glasgow", "Live"])
+def test_directory_album_broadening_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, title: str,
+) -> None:
+    client = model_client("error: No convincing match exists.\n", "error: Still no match.\n")
+    responses = [
+        BytesIO(json.dumps({"releases": [{"id": RELEASE_ID, "title": "Unrelated"}]}).encode())
+        for _ in range(2)
+    ]
+    network = MagicMock(side_effect=responses)
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    monkeypatch.setattr(populate.time, "sleep", MagicMock())
+    with pytest.raises(populate.NoCatalogueMatch):
+        populate.resolve_album("Artist", title, 1979, cast(OpenAI, client), populate.MusicBrainz())
+    assert network.call_count == (2 if title == "Live in Glasgow" else 1)
+
+
+@pytest.mark.parametrize("problem", ["artist-credit", "date", "title"])
+def test_broadened_album_still_validates_release(
+    release: dict[str, object], monkeypatch: pytest.MonkeyPatch, problem: str,
+) -> None:
+    selected: dict[str, object] = {**release, "title": "Glasgow 1979", "date": "1979"}
+    selected[problem] = {
+        "artist-credit": [{"name": "Wrong artist"}], "date": "2000", "title": "Live in London",
+    }[problem]
+    client = model_client("option: 1\ngenre: Classic Rock\n")
+    network = MagicMock(side_effect=[
+        BytesIO(b'{"releases": []}'),
+        BytesIO(json.dumps({"releases": [{"id": RELEASE_ID, "title": "Glasgow 1979"}]}).encode()),
+        BytesIO(json.dumps(selected).encode()),
+    ])
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    monkeypatch.setattr(populate.time, "sleep", MagicMock())
+    with pytest.raises(ValueError, match="does not match scoped album"):
+        populate.resolve_album("Artist", "Live in Glasgow", 1979, cast(OpenAI, client), populate.MusicBrainz())
+    assert network.call_count == 3
+
+
+@pytest.mark.parametrize("failure", ["http", "malformed"])
+def test_directory_album_does_not_broaden_for_http_or_malformed_response(
+    monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    client = model_client()
+    network = MagicMock(return_value=BytesIO(b'{"error": "Server error"}'))
+    if failure == "http":
+        network.side_effect = http_error(503)
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    with pytest.raises(HTTPError if failure == "http" else ValueError):
+        populate.resolve_album(
+            "Artist", "Live in Glasgow", 1979, cast(OpenAI, client), populate.MusicBrainz(max_attempts=1),
+        )
+    network.assert_called_once()
+    client.chat.completions.create.assert_not_called()
+
+
+def test_album_key_tokens_do_not_add_fuzzy_terms_or_lucene_operators() -> None:
+    assert populate.album_title_terms('Live in Glasgow: "II" +evil* -other') == ["glasgow", "ii", "evil", "other"]
+
+
 @pytest.mark.parametrize("mismatch", ["artist-credit", "title", "date"])
 def test_scoped_cli_rejects_wrong_album(
     tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,

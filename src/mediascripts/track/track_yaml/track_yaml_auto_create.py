@@ -212,6 +212,10 @@ def mapping_list(value: object, field: str) -> list[dict[str, object]]:
     return [item for item in value if is_mapping(item)]
 
 
+class NoCatalogueMatch(ValueError):
+    """The search or model found no convincing catalogue match."""
+
+
 def ask_model(client: OpenAI, system: str, prompt: str) -> dict[str, object]:
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system + "\n" + YAML_STRING_INSTRUCTIONS},
@@ -258,22 +262,25 @@ def ask_model(client: OpenAI, system: str, prompt: str) -> dict[str, object]:
             continue
         break
     if "error" in result:
-        raise ValueError(f"Could not identify request: {result['error']}")
+        raise NoCatalogueMatch(f"Could not identify request: {result['error']}")
     return result
 
 
 def search_candidates(
-    catalogue: MusicBrainz, entity: str, artist: str, title: str,
+    catalogue: MusicBrainz, entity: str, artist: str, title: str, *, title_terms: list[str] | None = None,
 ) -> list[dict[str, object]]:
-    query = f"artist:{lucene_phrase(artist)} AND {entity}:{lucene_phrase(title)}"
-    logger.info("MusicBrainz search: quoted artist/title only; no fuzzy fallback")
+    clauses = [f"artist:{lucene_phrase(artist)}"]
+    clauses.extend(f"{entity}:{lucene_phrase(term)}" for term in (title_terms or [title]))
+    query = " AND ".join(clauses)
+    logger.info("MusicBrainz search: %s; artist filter retained; no fuzzy terms",
+                "key title tokens" if title_terms else "full quoted title")
     result = catalogue.get(entity, query=query, limit="10")
     if "error" in result:
         raise ValueError(f"MusicBrainz search error: {result['error']}")
     candidates = mapping_list(result.get(f"{entity}s"), f"MusicBrainz {entity}s")
     logger.info("MusicBrainz search returned %d %s candidate(s)", len(candidates), entity)
     if not candidates:
-        raise ValueError(f"No MusicBrainz matches for {artist} - {title}; search was not broadened")
+        raise NoCatalogueMatch(f"No MusicBrainz matches for {artist} - {title}")
     return candidates
 
 
@@ -666,23 +673,56 @@ def infer_album_identity(album: Path, *, artist_scope: bool = False) -> tuple[st
     return artist.strip(), title.strip(), int(str(year))
 
 
+def album_title_terms(title: str) -> list[str]:
+    words = re.findall(r"[^\W_]+", title, re.UNICODE)
+    generic = {"a", "an", "the", "and", "of", "in", "at", "on", "from", "with", "live", "album"}
+    return list(dict.fromkeys(word.casefold() for word in words if word.casefold() not in generic))
+
+
 def resolve_album(
     artist: str, title: str, year: int, client: OpenAI, catalogue: MusicBrainz,
 ) -> tuple[dict[str, object], str]:
-    candidates = search_candidates(catalogue, "release", artist, title)
-    # Missing search dates may be filled by the release lookup; known wrong years are never selected.
-    candidates = [item for item in candidates if not item.get("date") or str(item["date"])[:4] == str(year)]
-    options, identifiers = selection_options(candidates, "album")
-    _, release_id, genre = select_catalogue_option(
-        client,
-        f"Create missing tracks for this exact album, not an artist's most popular song:\n"
-        f"{json.dumps({'artist': artist, 'album': title, 'year': year}, ensure_ascii=False)}\n"
-        f"Numbered options:\n{json.dumps(options, ensure_ascii=False)}",
-        identifiers, "album",
-    )
+    terms = album_title_terms(title)
+    broadened = False
+    for title_terms in (None, terms):
+        try:
+            candidates = search_candidates(catalogue, "release", artist, title, title_terms=title_terms)
+            # Missing search dates may be filled by the lookup; known wrong years are never selected.
+            candidates = [item for item in candidates if not item.get("date") or str(item["date"])[:4] == str(year)]
+            if not candidates:
+                raise NoCatalogueMatch(f"No release candidates match the expected year {year}")
+            options, identifiers = selection_options(candidates, "album")
+            _, release_id, genre = select_catalogue_option(
+                client,
+                f"Create missing tracks for this album, not an artist's most popular song:\n"
+                f"{json.dumps({'artist': artist, 'album': title, 'year': year}, ensure_ascii=False)}\n"
+                "The local album title may differ from the catalogue wording. "
+                "Accept a title variant only if it convincingly identifies the same album, "
+                "artist, year and live/studio version; reject unrelated concerts or editions.\n"
+                f"Numbered options:\n{json.dumps(options, ensure_ascii=False)}",
+                identifiers, "album",
+            )
+        except NoCatalogueMatch as error:
+            if title_terms is not None or not terms or terms == [title.casefold()]:
+                raise
+            logger.warning(
+                "Full-title album lookup failed: %s; broadening to key title tokens %r "
+                "while retaining artist %r and local year validation (%d)",
+                error, terms, artist, year,
+            )
+        else:
+            broadened = title_terms is not None
+            break
+    else:
+        raise NoCatalogueMatch(f"No convincing album match for {artist} - {title} [{year}]")
     release = catalogue.get(f"release/{release_id}", inc="recordings+artist-credits")
+    release_title = text_field(release, "title")
+    title_matches = (
+        set(terms).issubset(set(album_title_terms(release_title))) if broadened
+        else directory_name_key(release_title) == directory_name_key(title)
+    )
     if (release.get("id") != release_id
-            or directory_name_key(text_field(release, "title")) != directory_name_key(title)
+            or not title_matches
             or directory_name_key(artist_credit(release.get("artist-credit"))) != directory_name_key(artist)
             or text_field(release, "date")[:4] != str(year)):
         raise ValueError(f"Selected release does not match scoped album {artist} - {title} [{year}]")

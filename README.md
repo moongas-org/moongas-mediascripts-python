@@ -1110,8 +1110,18 @@ silently guessed.
 Each identified album is searched using quoted artist/title phrases only,
 without fuzzy terms or a date clause. The inferred year is used to filter returned
 candidates and validate the selected release locally, rather than restricting
-the search by a specific release-event date. The selected release must match
-artist, title and year. New files stay in the existing album directory
+the search by a specific release-event date. If this search returns no usable
+candidates or the model finds no convincing match, directory mode tries one
+broader search using individual key title words, omitting generic words such
+as `live`, `in`, and `the`. For example, `Live in Glasgow` falls back to
+`artist:"Paul McCartney" AND release:"glasgow"`. This fallback retains the artist
+filter, uses no fuzzy operators or date clause, and is skipped when there are
+no useful terms or the query would be unchanged. The model must still identify
+the same album and live/studio version; differing catalogue title wording is
+allowed only on this fallback, with key title words, artist and year validated
+against the fetched release. A second rejection ends the attempt. HTTP and
+malformed-response errors do not trigger search broadening.
+New files stay in the existing album directory
 even when its spelling differs from the catalogue. Existing track YAML is
 preserved, including tracks with nonstandard filenames matched by title.
 When matching local media exists, its basename is used for the new YAML sidecar.
@@ -1153,8 +1163,9 @@ with the highest ListenBrainz total listen count; missing popularity data is an
 error, not a guessed selection. Searches use quoted artist/title phrases,
 for example `artist:"Paul McCartney" AND release:"McCartney II"`, with at most
 ten candidates. There are no fuzzy searches, date clauses, or fallbacks removing
-the artist filter. An empty result leaves the request pending; the search is
-not broadened. The LLM must still reject unrelated artists, recordings and editions.
+the artist filter. In request-file mode an empty result leaves the request pending
+without broadening. Directory-mode albums use the bounded key-word fallback
+described above. The LLM must still reject unrelated artists, recordings and editions.
 The LLM selects from numbered recording/release pairs rather than copying
 MusicBrainz IDs; the command resolves those numbers back to the original
 catalogue IDs. Invalid selections are retried up to three times, then the
