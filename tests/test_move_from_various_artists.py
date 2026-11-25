@@ -722,7 +722,10 @@ def test_cli_forwards_count_and_sleep(
         flag, "3", "--sleep", "2.5", "-n",
     ])
     assert move.main() == 0
-    runner.assert_called_once_with(data_root(source), count=3, sleep=2.5, dry_run=True)
+    runner.assert_called_once_with(
+        data_root(source), count=3, sleep=2.5, dry_run=True,
+        max_attempts=6, retry_delay=10.0, max_retry_delay=120.0,
+    )
 
 
 @pytest.mark.parametrize("arguments", [
@@ -759,7 +762,7 @@ def test_sleep_is_forwarded_to_catalogue(source: Path, monkeypatch: pytest.Monke
     factory.return_value.get.return_value = {"count": 0, "recordings": []}
     monkeypatch.setattr(move, "MusicBrainz", factory)
     assert not move.move_from_various_artists(data_root(source), sleep=3.5)
-    factory.assert_called_once_with(sleep=3.5)
+    factory.assert_called_once_with(sleep=3.5, max_attempts=6, retry_delay=10.0, max_retry_delay=120.0)
 
 
 @pytest.mark.parametrize("retry", [False, True])
@@ -873,10 +876,10 @@ def test_retry_logging_distinguishes_backoff_from_ten_second_pacing(
         catalogue_http.MusicBrainz(sleep=10).get("release", recording=RECORDING)
 
     assert starts == [0, 10, 20, 30]
-    assert waits == [1, 9, 1, 9, 1, 9]
-    assert "Retry-After header: '1'; retry backoff: 1.00s" in caplog.text
-    assert "1.00s backoff; the 10.00s minimum request-start interval is enforced separately" in caplog.text
-    assert "rate-limit wait: 9.00s (minimum request-start interval: 10.00s; attempt 2/4)" in caplog.text
+    assert waits == [2, 8, 4, 6, 8, 2]
+    assert "Retry-After header: '1'; exponential backoff: 2.00s; effective backoff: 2.00s" in caplog.text
+    assert "2.00s backoff; the 10.00s minimum request-start interval is enforced separately" in caplog.text
+    assert "rate-limit wait: 8.00s (minimum request-start interval: 10.00s; attempt 2/4)" in caplog.text
     assert "retry limit exhausted" in caplog.text
 
 
@@ -889,3 +892,95 @@ def test_verbose_cli_enables_debug_with_timestamps(source: Path, monkeypatch: py
     configure.assert_called_once_with(
         level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def test_cli_forwards_retry_options(source: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = MagicMock(return_value=True)
+    monkeypatch.setattr(move, "move_from_various_artists", runner)
+    monkeypatch.setattr(sys, "argv", [
+        "move-from-various-artists", "--dir", str(data_root(source)), "-n",
+        "--sleep", "10", "--max-attempts", "8", "--retry-delay", "30", "--max-retry-delay", "300",
+    ])
+    assert move.main() == 0
+    runner.assert_called_once_with(
+        data_root(source), dry_run=True, count=1, sleep=10,
+        max_attempts=8, retry_delay=30, max_retry_delay=300,
+    )
+
+
+@pytest.mark.parametrize("arguments", [
+    ["--max-attempts", "0"], ["--max-attempts", "-1"],
+    ["--retry-delay", "0"], ["--retry-delay", "-1"], ["--retry-delay", "nan"],
+    ["--retry-delay", "inf"], ["--max-retry-delay", "nan"], ["--max-retry-delay", "inf"],
+    ["--retry-delay", "30", "--max-retry-delay", "20"],
+])
+def test_cli_rejects_invalid_retry_options(monkeypatch: pytest.MonkeyPatch, arguments: list[str]) -> None:
+    monkeypatch.setattr(sys, "argv", ["move-from-various-artists", *arguments])
+    with pytest.raises(SystemExit) as error:
+        move.main()
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize(("max_attempts", "retry_delay", "cap"), [
+    (6, 10.0, 120.0), (5, 30.0, 60.0), (1, 10.0, 120.0),
+])
+def test_repeated_503_backs_off_despite_short_retry_after(
+    monkeypatch: pytest.MonkeyPatch, max_attempts: int, retry_delay: float, cap: float,
+) -> None:
+    clock = 0.0
+    starts: list[float] = []
+    waits: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        nonlocal clock
+        waits.append(seconds)
+        clock += seconds
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        starts.append(clock)
+        headers = Message()
+        headers["Retry-After"] = "1"
+        raise HTTPError("https://musicbrainz.org/ws/2/recording", 503, "Unavailable", headers, BytesIO())
+
+    monkeypatch.setattr(catalogue_http.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(catalogue_http.time, "sleep", sleep)
+    monkeypatch.setattr(catalogue_http, "urlopen", fail)
+    client = catalogue_http.MusicBrainz(
+        sleep=10, max_attempts=max_attempts, retry_delay=retry_delay, max_retry_delay=cap,
+    )
+    with pytest.raises(HTTPError):
+        client.get("recording", query="test")
+    expected_waits = [min(cap, retry_delay * 2 ** index) for index in range(max_attempts - 1)]
+    assert [wait for wait in waits if wait > 0] == expected_waits
+    assert len(starts) == max_attempts
+    assert all(later - earlier >= 10 for earlier, later in zip(starts, starts[1:]))
+    if max_attempts == 6:
+        assert starts == [0, 10, 30, 70, 150, 270]
+
+
+def test_backoff_resets_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    network = MagicMock(side_effect=[TimeoutError(), BytesIO(b"{}"), TimeoutError(), BytesIO(b"{}")])
+    sleeper = MagicMock()
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    monkeypatch.setattr(catalogue_http.time, "sleep", sleeper)
+    monkeypatch.setattr(catalogue_http.time, "monotonic", MagicMock(side_effect=[0, 10, 10, 20, 20, 30, 30]))
+    client = catalogue_http.MusicBrainz(retry_delay=10)
+    assert client.get("recording", query="first") == {}
+    assert client.get("recording", query="second") == {}
+    assert [call.args[0] for call in sleeper.call_args_list if call.args[0] > 0] == [10, 10]
+
+
+@pytest.mark.parametrize(("attempts", "delay", "cap"), [
+    (0, 10.0, 120.0), (-1, 10.0, 120.0), (True, 10.0, 120.0),
+    (4, 0.0, 120.0), (4, float("nan"), 120.0), (4, float("inf"), 120.0),
+    (4, 10.0, 5.0), (4, 10.0, float("nan")), (4, 10.0, float("inf")),
+])
+def test_retry_validation_at_api_boundaries(
+    source: Path, attempts: int, delay: float, cap: float,
+) -> None:
+    with pytest.raises(ValueError):
+        catalogue_http.MusicBrainz(max_attempts=attempts, retry_delay=delay, max_retry_delay=cap)
+    with pytest.raises(ValueError):
+        move.move_from_various_artists(
+            data_root(source), max_attempts=attempts, retry_delay=delay, max_retry_delay=cap,
+        )

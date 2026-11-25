@@ -648,6 +648,7 @@ the source `Various Artists` directory, not placed at the top of `data`.
 move-from-various-artists -n
 move-from-various-artists --dir /collection/data
 move-from-various-artists --count 10 --sleep 2
+move-from-various-artists -n --sleep 10 --max-attempts 8 --retry-delay 30 --max-retry-delay 300
 ```
 
 Changes are made by default; `-n` / `--dry-run` performs the same online lookup
@@ -703,9 +704,21 @@ track may match multiple MusicBrainz recordings, all filtered from the search
 response without individual recording requests; distinct album groups require
 original-metadata lookups instead.
 `--count` limits tracks, not API requests. Rate-limit waits are shown at INFO.
-For example, `--sleep 10` enforces at least 10 seconds between request starts;
-a logged `Retry-After` backoff of 1 second may be followed by a further pacing
-wait before the retry. Repeated HTTP 503 responses exhaust the bounded retries
+For example, `--sleep 10` enforces at least 10 seconds between request starts.
+`--max-attempts` controls total attempts per request, including the first
+(default: 6; 1 disables retries). `--retry-delay` is the initial exponential
+backoff (default: 10 seconds), doubled after each transient failure up to
+`--max-retry-delay` (default: 120 seconds). The default backoffs are therefore
+10, 20, 40, 80 and 120 seconds. These retry defaults apply to this move script;
+other shared-client users retain their existing attempt/backoff defaults.
+A valid `Retry-After` is an additional minimum, never a reason to shorten the
+exponential backoff; server-requested waits above the backoff cap are honored.
+Request-start pacing is also enforced, without adding a full `--sleep` again
+when the backoff already satisfies it. Backoff resets after a successful request.
+Persistent 503s, including on the first request, do not by themselves prove
+client rate limiting: the service or an upstream proxy may be unavailable.
+Longer waits may help temporary outages, but are not a guaranteed fix.
+Repeated HTTP 503 responses exhaust the bounded retries
 and stop the run, with the current track path and completed-track count logged.
 Use `-v` / `--verbose` for individual candidate rejection details and raw
 MusicBrainz responses. Dry runs still query MusicBrainz but never change files.

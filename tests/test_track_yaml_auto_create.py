@@ -1694,7 +1694,7 @@ def test_retries_are_bounded_and_failed_input_retained(
 
 
 @pytest.mark.parametrize(
-    "header,expected", [("7", 7.0), ("999999", 120.0), ("0", 0.0), ("invalid", 2.0)]
+    "header,expected", [("7", 7.0), ("999999", 999999.0), ("0", 2.0), ("1", 2.0), ("invalid", 2.0)]
 )
 def test_retry_after_seconds_respected(
     monkeypatch: pytest.MonkeyPatch,
@@ -1720,7 +1720,7 @@ def test_retry_after_http_date() -> None:
     past = format_datetime(
         datetime.now(timezone.utc) - timedelta(seconds=60), usegmt=True
     )
-    assert catalogue_http.retry_after_delay(past, 2.0) == 0
+    assert catalogue_http.retry_after_delay(past, 2.0) == 2.0
 
 
 @pytest.mark.parametrize("body", [b"not JSON", b"[]"])

@@ -21,7 +21,7 @@ from ruamel.yaml.error import YAMLError
 
 from mediascripts.acoustid.musicbrainz import MIN_SLEEP, is_recording_id, sleep_seconds
 from mediascripts.common.files import album_directory, directory_name_key
-from mediascripts.common.musicbrainz import MusicBrainz, lucene_phrase
+from mediascripts.common.musicbrainz import MAX_RETRY_DELAY, MusicBrainz, lucene_phrase
 from mediascripts.lyrics.lyrics_common import MEDIA_EXTENSIONS
 from mediascripts.mediafile.auto_tag_media_file import load_media, read_track_values, text_values
 from mediascripts.track.track_yaml.track_yaml_common import (
@@ -37,6 +37,15 @@ logger = logging.getLogger(__name__)
 YAML_SUFFIXES = {".yml", ".yaml"}
 RESERVED_STEMS = {"album", "artist", "artists", "files"}
 UNKNOWN_ARTISTS = {"various artists", "various", "va", "v a", "unknown", "unknown artist"}
+
+
+def validate_retry_options(max_attempts: int, retry_delay: float, max_retry_delay: float) -> None:
+    if type(max_attempts) is not int or max_attempts < 1:
+        raise ValueError("max_attempts must be an integer >= 1")
+    if not math.isfinite(retry_delay) or retry_delay < 0:
+        raise ValueError("retry_delay must be a finite number >= 0")
+    if not math.isfinite(max_retry_delay) or max_retry_delay < retry_delay:
+        raise ValueError("max_retry_delay must be finite and >= retry_delay")
 
 
 class _Yaml(Protocol):
@@ -528,20 +537,24 @@ def move_track(
 
 def move_from_various_artists(
     data_root: Path, *, dry_run: bool = False, count: int | None = 1, sleep: float = MIN_SLEEP,
+    max_attempts: int = 6, retry_delay: float = 10.0, max_retry_delay: float = MAX_RETRY_DELAY,
 ) -> bool:
     """Skip uncertain/colliding tracks and limit successful moves or previews."""
     if count is not None and count < 0:
         raise ValueError("count must be non-negative")
     if not math.isfinite(sleep) or sleep < MIN_SLEEP:
         raise ValueError(f"sleep must be a finite number of seconds >= {MIN_SLEEP:g}")
+    validate_retry_options(max_attempts, retry_delay, max_retry_delay)
     if count == 0:
         logger.info("Track limit is zero; nothing to process")
         return False
     data_root = data_root.absolute()
     logger.info(
-        "Move settings: root=%s dry_run=%s count=%s sleep=%.2fs; "
+        "Move settings: root=%s dry_run=%s count=%s sleep=%.2fs max_attempts=%d "
+        "retry_delay=%.2fs max_retry_delay=%.2fs; "
         "count limits successful tracks, not MusicBrainz requests; dry-run still performs online lookups",
         data_root, dry_run, count if count is not None else "unlimited", sleep,
+        max_attempts, retry_delay, max_retry_delay,
     )
     if not data_root.is_dir():
         raise NotADirectoryError(data_root)
@@ -563,7 +576,9 @@ def move_from_various_artists(
         raise FileNotFoundError(f"No Various Artists directory under {data_root}")
     seen: set[tuple[Path, str]] = set()
     logger.info("Found %d Various Artists source directory(s): %s", len(sources), [str(source) for source in sources])
-    catalogue = MusicBrainz(sleep=sleep)
+    catalogue = MusicBrainz(
+        sleep=sleep, max_attempts=max_attempts, retry_delay=retry_delay, max_retry_delay=max_retry_delay,
+    )
     processed = 0
     attempted = 0
     skipped = 0
@@ -624,10 +639,26 @@ def main() -> int:
         "--sleep", type=sleep_seconds, default=MIN_SLEEP,
         help=f"Minimum seconds between API requests (default and minimum: {MIN_SLEEP:g}).",
     )
+    parser.add_argument(
+        "--max-attempts", type=int, default=6,
+        help="Total attempts per API request, including the first (default: 6; minimum: 1).",
+    )
+    parser.add_argument(
+        "--retry-delay", type=float, default=10.0,
+        help="Initial retry backoff in seconds, doubled after each failure (default: 10).",
+    )
+    parser.add_argument(
+        "--max-retry-delay", type=float, default=MAX_RETRY_DELAY,
+        help="Maximum exponential backoff in seconds (default: 120); a longer Retry-After is still honored.",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Include DEBUG logs and raw MusicBrainz responses.")
     args = parser.parse_args()
     if args.count < 0:
         parser.error("--count must be non-negative")
+    try:
+        validate_retry_options(args.max_attempts, args.retry_delay, args.max_retry_delay)
+    except ValueError as error:
+        parser.error(str(error))
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
@@ -639,7 +670,10 @@ def main() -> int:
             parser.error("Set MOONGAS_COLLECTION_ROOTDIR or supply --dir")
         directory = Path(root) / "data"
     try:
-        move_from_various_artists(directory, dry_run=args.dry_run, count=args.count, sleep=args.sleep)
+        move_from_various_artists(
+            directory, dry_run=args.dry_run, count=args.count, sleep=args.sleep,
+            max_attempts=args.max_attempts, retry_delay=args.retry_delay, max_retry_delay=args.max_retry_delay,
+        )
     except (OSError, ValueError, YAMLError, UnicodeError) as error:
         logger.error("Could not move track: %s", error)
         return 1
