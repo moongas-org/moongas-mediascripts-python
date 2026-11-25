@@ -636,7 +636,7 @@ which avoids invalid double-quote characters on NTFS.
 
 ## Move Tracks Out of Various Artists
 
-`move-from-various-artists` attempts to move **one identifiable track per run by default**
+`move-from-various-artists` attempts to move **all identifiable tracks by default**
 from a `Various Artists` directory into its own artist/album directory.
 Whitespace and case variants such as `Various  Artists` are recognized.
 By default it recursively scans `$MOONGAS_COLLECTION_ROOTDIR/data`; use `-d` /
@@ -653,8 +653,11 @@ move-from-various-artists -n --sleep 10 --max-attempts 8 --retry-delay 30 --max-
 
 Changes are made by default; `-n` / `--dry-run` performs the same online lookup
 and previews moves and YAML changes without writing anything. `-c` / `--count`
-limits successful moves (or dry-run previews), defaulting to 1; skipped tracks
-do not consume the limit, and 0 processes nothing. `--sleep` sets the minimum
+optionally limits successful moves (or dry-run previews); the default is unlimited.
+Skipped tracks do not consume the limit, and 0 processes nothing. Use `--count 1`
+to stop after one successful move. Each discovered track is attempted once;
+unidentifiable or colliding tracks and shared album metadata/artwork are left in
+place rather than retried indefinitely. `--sleep` sets the minimum
 seconds between MusicBrainz API requests, including retries (default and minimum:
 1.01). Local
 identification uses track YAML, embedded artist tags, then an `Artist - Title`

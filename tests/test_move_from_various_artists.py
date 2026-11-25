@@ -113,7 +113,7 @@ def test_moves_one_yaml_track_to_original_album(
     sibling.write_bytes(original)
     source_album = (source.parent / "album.yml").read_bytes()
 
-    assert move.move_from_various_artists(root, dry_run=dry_run)
+    assert move.move_from_various_artists(root, dry_run=dry_run, count=1)
 
     catalogue.get.assert_any_call(
         "recording",
@@ -679,10 +679,29 @@ def test_cli_default_and_dry_run(
     source: Path, catalogue: MagicMock, monkeypatch: pytest.MonkeyPatch, dry_run: bool,
 ) -> None:
     monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(data_root(source).parent))
+    sibling = source.with_name("02 - Track.yml")
+    sibling.write_bytes(source.read_bytes())
+    unknown = source.with_name("00 - Unknown.yml")
+    unknown.write_text("trackData: {artist: Various Artists, title: Unknown}\n")
     monkeypatch.setattr(sys, "argv", ["move-from-various-artists", *(["-n"] if dry_run else [])])
     assert move.main() == 0
     assert source.exists() == dry_run
     assert target(source).exists() != dry_run
+    assert sibling.exists() == dry_run
+    assert (target(source).parent / sibling.name).exists() != dry_run
+    assert unknown.exists()
+    assert (source.parent / "album.yml").exists()
+    assert catalogue.get.call_count == 4
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_api_default_processes_all_tracks(source: Path, catalogue: MagicMock, dry_run: bool) -> None:
+    sibling = source.with_name("02 - Track.yml")
+    sibling.write_bytes(source.read_bytes())
+    assert move.move_from_various_artists(data_root(source), dry_run=dry_run)
+    assert catalogue.get.call_count == 4
+    assert source.exists() == dry_run
+    assert sibling.exists() == dry_run
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -903,7 +922,7 @@ def test_cli_forwards_retry_options(source: Path, monkeypatch: pytest.MonkeyPatc
     ])
     assert move.main() == 0
     runner.assert_called_once_with(
-        data_root(source), dry_run=True, count=1, sleep=10,
+        data_root(source), dry_run=True, count=None, sleep=10,
         max_attempts=8, retry_delay=30, max_retry_delay=300,
     )
 

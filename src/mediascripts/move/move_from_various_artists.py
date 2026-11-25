@@ -536,7 +536,7 @@ def move_track(
 
 
 def move_from_various_artists(
-    data_root: Path, *, dry_run: bool = False, count: int | None = 1, sleep: float = MIN_SLEEP,
+    data_root: Path, *, dry_run: bool = False, count: int | None = None, sleep: float = MIN_SLEEP,
     max_attempts: int = 6, retry_delay: float = 10.0, max_retry_delay: float = MAX_RETRY_DELAY,
 ) -> bool:
     """Skip uncertain/colliding tracks and limit successful moves or previews."""
@@ -632,8 +632,8 @@ def main() -> int:
     parser.add_argument("-d", "--dir", type=Path, help="Collection data directory to search recursively.")
     parser.add_argument("-n", "--dry-run", action="store_true", help="Preview moves without changing any files.")
     parser.add_argument(
-        "-c", "--count", type=int, default=1,
-        help="Maximum successful moves or previews (non-negative; default: 1).",
+        "-c", "--count", type=int,
+        help="Maximum successful moves or previews (non-negative; default: unlimited).",
     )
     parser.add_argument(
         "--sleep", type=sleep_seconds, default=MIN_SLEEP,
@@ -653,7 +653,7 @@ def main() -> int:
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Include DEBUG logs and raw MusicBrainz responses.")
     args = parser.parse_args()
-    if args.count < 0:
+    if args.count is not None and args.count < 0:
         parser.error("--count must be non-negative")
     try:
         validate_retry_options(args.max_attempts, args.retry_delay, args.max_retry_delay)
