@@ -54,23 +54,25 @@ def responses() -> dict[str, dict[str, object]]:
     release: dict[str, object] = {
         "status": "Official", "artist-credit": CREDIT, "release-group": group,
     }
+    releases = [
+        {**release, "release-group": {**group, "secondary-types": ["Compilation"]}},
+        {**release, "status": "Bootleg"},
+        release,
+    ]
     return {
         "recording": {
             "count": 1,
-            "recordings": [{"id": RECORDING, "title": "Track", "artist-credit": CREDIT}],
-        },
-        "release": {
-            "release-count": 3,
-            "releases": [
-                {**release, "release-group": {**group, "secondary-types": ["Compilation"]}},
-                {**release, "status": "Bootleg"},
-                release,
-            ],
+            "recordings": [{"id": RECORDING, "title": "Track", "artist-credit": CREDIT, "releases": releases}],
         },
         f"release-group/{GROUP}": {
             **group, "artist-credit": CREDIT, "title": "Original Album", "first-release-date": "1995-04-03",
         },
     }
+
+
+def set_embedded_releases(responses: dict[str, dict[str, object]], releases: list[dict[str, object]]) -> None:
+    recordings = move.catalogue_items(responses["recording"], "recordings")
+    recordings[0]["releases"] = releases
 
 
 @pytest.fixture
@@ -114,7 +116,10 @@ def test_moves_one_yaml_track_to_original_album(
     assert move.move_from_various_artists(root, dry_run=dry_run)
 
     catalogue.get.assert_any_call(
-        "recording", query='artist:"Artist" AND recording:"Track"', limit="100",
+        "recording",
+        query='artist:"Artist" AND recording:"Track" AND primarytype:album AND status:official'
+        ' AND firstreleasedate:[* TO 2005-12-31]',
+        limit="100",
     )
     assert sibling.read_bytes() == original
     assert (source.parent / "album.yml").read_bytes() == source_album
@@ -336,18 +341,15 @@ def test_network_failure_does_not_move(source: Path, catalogue: MagicMock) -> No
 def test_catalogue_rejects_compilations_and_live_albums(
     source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
 ) -> None:
-    responses["release"] = {
-        "release-count": 2,
-        "releases": [
+    set_embedded_releases(responses, [
             {"status": "Official", "artist-credit": CREDIT, "release-group": {
                 "id": GROUP, "primary-type": "Album", "secondary-types": [kind],
             }}
             for kind in ("Compilation", "Live")
-        ],
-    }
+    ])
     assert not move.move_from_various_artists(data_root(source))
     assert source.exists()
-    assert catalogue.get.call_count == 2
+    assert catalogue.get.call_count == 1
 
 
 @pytest.mark.parametrize("mutation", ["wrong-title", "wrong-artist", "live", "video", "truncated-search"])
@@ -371,14 +373,11 @@ def test_uncertain_recording_is_not_moved(
 def test_earliest_album_beats_later_reissue(
     source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
 ) -> None:
-    responses["release"] = {
-        "release-count": 2,
-        "releases": [
+    set_embedded_releases(responses, [
             {"status": "Official", "artist-credit": CREDIT, "release-group": {
                 "id": identifier, "primary-type": "Album", "secondary-types": [],
             }} for identifier in (OTHER_GROUP, GROUP)
-        ],
-    }
+    ])
     responses[f"release-group/{OTHER_GROUP}"] = {
         "id": OTHER_GROUP, "primary-type": "Album", "artist-credit": CREDIT,
         "title": "Later Album", "first-release-date": "2000",
@@ -390,14 +389,11 @@ def test_earliest_album_beats_later_reissue(
 def test_ambiguous_same_year_albums_are_skipped(
     source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
 ) -> None:
-    responses["release"] = {
-        "release-count": 2,
-        "releases": [
+    set_embedded_releases(responses, [
             {"status": "Official", "artist-credit": CREDIT, "release-group": {
                 "id": identifier, "primary-type": "Album", "secondary-types": [],
             }} for identifier in (GROUP, OTHER_GROUP)
-        ],
-    }
+    ])
     responses[f"release-group/{OTHER_GROUP}"] = {
         "id": OTHER_GROUP, "primary-type": "Album", "artist-credit": CREDIT,
         "title": "Another Album", "first-release-date": "1995",
@@ -406,7 +402,129 @@ def test_ambiguous_same_year_albums_are_skipped(
     assert source.exists()
 
 
-def test_release_pagination_and_group_cache(
+def test_oldest_album_wins_across_recordings_even_when_source_year_matches_reissue(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    responses["recording"] = {
+        "count": 2, "recordings": [
+            {"id": recording_id, "title": "Track", "artist-credit": CREDIT, "releases": [{
+                "status": "Official", "artist-credit": CREDIT,
+                "release-group": {"id": group_id, "primary-type": "Album", "secondary-types": []},
+            }]}
+            for recording_id, group_id in ((RECORDING, GROUP), (OTHER_GROUP, OTHER_GROUP))
+        ],
+    }
+    responses[f"release-group/{OTHER_GROUP}"] = {
+        "id": OTHER_GROUP, "primary-type": "Album", "artist-credit": CREDIT,
+        "title": "Original Album (Deluxe Edition)", "first-release-date": "2005",
+    }
+
+    assert move.move_from_various_artists(data_root(source))
+    assert core(target(source))["album"] == "Original Album"
+    assert core(target(source))["year"] == 1995
+
+
+@pytest.mark.parametrize("title", [
+    "Original Album (Deluxe Edition)",
+    "Original Album [2011 Remastered]",
+    "Original Album - 25th Anniversary Edition",
+    "Original Album (Super Deluxe Edition) (2011 Remaster)",
+])
+def test_original_title_is_used_in_directory_and_both_yaml_files(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]], title: str,
+) -> None:
+    responses[f"release-group/{GROUP}"]["title"] = title
+    assert move.move_from_various_artists(data_root(source))
+    assert core(target(source))["album"] == "Original Album"
+    assert core(target(source))["year"] == 1995
+    assert move.yaml_document(target(source).parent / "album.yml")["albumData"] == {
+        "name": "Original Album", "dateReleased": {"y": 1995}, "explicitCover": False,
+    }
+
+
+def test_existing_album_metadata_is_corrected_to_original(
+    source: Path, catalogue: MagicMock,
+) -> None:
+    destination = target(source).parent
+    destination.mkdir(parents=True)
+    album_yaml = destination / "album.yml"
+    album_yaml.write_text(
+        "# preserve album comment\nalbumData:\n  name: Original Album (Deluxe Edition)\n"
+        "  dateReleased: {y: 2005, m: 6, d: 7}\n  explicitCover: true\n  genres: [Rock]\n"
+    )
+    assert move.move_from_various_artists(data_root(source))
+    assert move.yaml_document(album_yaml)["albumData"] == {
+        "name": "Original Album", "dateReleased": {"y": 1995}, "explicitCover": True, "genres": ["Rock"],
+    }
+    assert album_yaml.read_text().startswith("# preserve album comment\n")
+
+
+@pytest.mark.parametrize(("title", "expected"), [
+    ("Album (Deluxe)", "Album"),
+    ("Album [Expanded Edition]", "Album"),
+    ("Album (Collector's Edition)", "Album"),
+    ("Album (Remastered 2011)", "Album"),
+    ("Album (20th Anniversary Edition)", "Album"),
+    ("Album (Deluxe Edition, Remastered)", "Album"),
+    ("Album - Part II - Deluxe Edition", "Album - Part II"),
+    ("Album (Part II) (Deluxe Edition)", "Album (Part II)"),
+    ("(What's the Story) Morning Glory?", "(What's the Story) Morning Glory?"),
+    ("Album (Part II)", "Album (Part II)"),
+    ("Album (Deluxe Life)", "Album (Deluxe Life)"),
+    ("Deluxe", "Deluxe"),
+    ("(Deluxe Edition)", "(Deluxe Edition)"),
+    ("Album - The Original", "Album - The Original"),
+])
+def test_original_album_title_only_removes_edition_labels(title: str, expected: str) -> None:
+    assert move.original_album_title(title) == expected
+
+
+def test_edition_groups_with_same_original_title_are_not_ambiguous(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    set_embedded_releases(responses, [
+            {"status": "Official", "artist-credit": CREDIT, "release-group": {
+                "id": identifier, "primary-type": "Album", "secondary-types": [],
+            }} for identifier in (GROUP, OTHER_GROUP)
+    ])
+    responses[f"release-group/{OTHER_GROUP}"] = {
+        "id": OTHER_GROUP, "primary-type": "Album", "artist-credit": CREDIT,
+        "title": "Original Album (Deluxe Edition)", "first-release-date": "1995",
+    }
+    assert move.move_from_various_artists(data_root(source))
+    assert core(target(source))["album"] == "Original Album"
+    assert core(target(source))["year"] == 1995
+
+
+def test_dry_run_does_not_change_existing_edition_metadata(
+    source: Path, catalogue: MagicMock, capsys: pytest.CaptureFixture[str],
+) -> None:
+    destination = target(source).parent
+    destination.mkdir(parents=True)
+    album_yaml = destination / "album.yml"
+    original = "albumData: {name: Original Album (Deluxe Edition), dateReleased: {y: 2005}}\n"
+    album_yaml.write_text(original)
+    assert move.move_from_various_artists(data_root(source), dry_run=True)
+    assert source.exists()
+    assert not target(source).exists()
+    assert album_yaml.read_text() == original
+    output = capsys.readouterr().out
+    assert "+  name: Original Album" in output or "name: Original Album," in output
+    assert "1995" in output
+
+
+def test_unrelated_destination_album_name_is_not_overwritten(source: Path, catalogue: MagicMock) -> None:
+    destination = target(source).parent
+    destination.mkdir(parents=True)
+    album_yaml = destination / "album.yml"
+    original = "albumData: {name: Unrelated Album, dateReleased: {y: 2005}}\n"
+    album_yaml.write_text(original)
+    assert not move.move_from_various_artists(data_root(source))
+    assert source.exists()
+    assert album_yaml.read_text() == original
+
+
+def test_eighty_one_recordings_use_one_search_and_one_group_lookup(
     source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
 ) -> None:
     release: dict[str, object] = {
@@ -414,28 +532,71 @@ def test_release_pagination_and_group_cache(
         "release-group": {"id": GROUP, "primary-type": "Album", "secondary-types": []},
     }
 
-    def get(endpoint: str, **params: str) -> dict[str, object]:
-        if endpoint == "release":
-            return {
-                "release-count": 101,
-                "releases": [release] * (100 if params["offset"] == "0" else 1),
-            }
-        return copy.deepcopy(responses[endpoint])
-
-    catalogue.get.side_effect = get
+    responses["recording"] = {
+        "count": 81, "recordings": [
+            {"id": f"{index:08x}-96d6-46bb-a886-b277b87bafd4", "title": "Track",
+             "artist-credit": CREDIT, "releases": [release]}
+            for index in range(81)
+        ],
+    }
     assert move.move_from_various_artists(data_root(source))
-    catalogue.get.assert_any_call(
-        "release", recording=RECORDING, inc="artist-credits+release-groups", limit="100", offset="100",
-    )
+    assert catalogue.get.call_count == 2
+    assert all(call.args[0] != "release" for call in catalogue.get.call_args_list)
     assert len([
         call for call in catalogue.get.call_args_list if call.args[0] == f"release-group/{GROUP}"
     ]) == 1
 
 
-def test_incomplete_release_listing_is_not_used(
+def test_embedded_search_releases_can_omit_artist_credit(
     source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
 ) -> None:
-    responses["release"] = {"release-count": 1, "releases": []}
+    set_embedded_releases(responses, [{
+        "id": OTHER_GROUP, "title": "Original Album (Deluxe Edition)",
+        "status": "Official", "date": "2005",
+        "release-group": {"id": GROUP, "title": "Original Album", "primary-type": "Album"},
+    }])
+    recording = move.catalogue_items(responses["recording"], "recordings")[0]
+    recording["first-release-date"] = "1993"  # Earlier single, not the album release.
+    assert move.move_from_various_artists(data_root(source))
+    assert core(target(source))["year"] == 1995
+    assert core(target(source))["album"] == "Original Album"
+    assert catalogue.get.call_count == 2
+    query = catalogue.get.call_args_list[0].kwargs["query"]
+    assert "primarytype:album AND status:official" in query
+    assert "firstreleasedate:[* TO 2005-12-31]" in query
+    assert "-secondarytype:*" not in query
+    assert "firstreleasedate:2005*" not in query
+
+
+def test_complete_embedded_original_album_metadata_needs_only_one_request(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    set_embedded_releases(responses, [{
+        "status": "Official", "release-group": responses[f"release-group/{GROUP}"],
+    }])
+    assert move.move_from_various_artists(data_root(source))
+    assert core(target(source))["album"] == "Original Album"
+    assert core(target(source))["year"] == 1995
+    assert catalogue.get.call_count == 1
+
+
+def test_album_group_credit_is_still_verified_without_release_credit(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    set_embedded_releases(responses, [{
+        "status": "Official",
+        "release-group": {"id": GROUP, "primary-type": "Album"},
+    }])
+    responses[f"release-group/{GROUP}"]["artist-credit"] = [{"name": "Another Artist"}]
+    assert not move.move_from_various_artists(data_root(source))
+    assert source.exists()
+    assert catalogue.get.call_count == 2
+
+
+def test_missing_embedded_releases_are_not_used(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    del move.catalogue_items(responses["recording"], "recordings")[0]["releases"]
     assert not move.move_from_various_artists(data_root(source))
     assert source.exists()
 
@@ -539,7 +700,7 @@ def test_count_limits_successful_tracks(
 
     assert move.move_from_various_artists(data_root(source), count=count, dry_run=dry_run) == (expected > 0)
 
-    assert catalogue.get.call_count == expected * 3
+    assert catalogue.get.call_count == expected * 2
     assert unknown.exists()
     tracks = [source, *siblings]
     if dry_run:
@@ -631,6 +792,15 @@ def test_logging_explains_recording_and_release_selection(
             {"id": OTHER_GROUP, "title": "Track", "artist-credit": CREDIT, "disambiguation": "live"},
         ],
     }
+    set_embedded_releases(responses, [
+        {"status": "Official", "artist-credit": CREDIT, "release-group": {
+            "id": GROUP, "primary-type": "Album", "secondary-types": ["Compilation"],
+        }},
+        {"status": "Bootleg", "artist-credit": CREDIT},
+        {"status": "Official", "artist-credit": CREDIT, "release-group": {
+            "id": GROUP, "primary-type": "Album", "secondary-types": [],
+        }},
+    ])
     with caplog.at_level(logging.DEBUG):
         assert move.move_from_various_artists(data_root(source), dry_run=True, count=1, sleep=10)
     for expected in (
@@ -641,14 +811,14 @@ def test_logging_explains_recording_and_release_selection(
         "returned 2 recording(s), total=2",
         "source album='Compilation' year hint=2005",
         "Examining recording 1/2",
-        "still the same local track",
-        "collected=3/3",
+        "filtering embedded releases locally (no request for this recording)",
+        "3 embedded release(s)",
         "Eligible studio album: 'Original Album' [1995]",
         "3 release(s), 1 eligible studio album group(s)",
         "'secondary release type (e.g. compilation/live/remix)': 1",
         "'not Official': 1",
         "disambiguated version",
-        "1 examined, 1 rejected",
+        "1 examined locally, 1 rejected",
         "Track limit reached; stopping (attempted=1 completed=1 skipped=0)",
     ):
         assert expected in caplog.text
@@ -659,7 +829,7 @@ def test_logging_explains_no_eligible_albums(
     source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    responses["release"] = {"release-count": 0, "releases": []}
+    set_embedded_releases(responses, [])
     with caplog.at_level(logging.INFO):
         assert not move.move_from_various_artists(data_root(source), dry_run=True)
     assert "0 release(s), 0 eligible studio album group(s)" in caplog.text

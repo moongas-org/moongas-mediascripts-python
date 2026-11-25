@@ -661,13 +661,33 @@ filename (optionally track-number-prefixed). Title/year prefer track YAML over
 embedded tags; the source album YAML or directory supplies a missing year.
 The compilation album name is **never used as the destination album**.
 
-The script sends artist/title searches to MusicBrainz, checks exact normalized
-artist/title credits, and browses the matching recordings' official releases.
+The script sends an artist/title search to MusicBrainz with
+`primarytype:album AND status:official` and, when a source year is known,
+`firstreleasedate:[* TO YYYY-12-31]`. It checks exact normalized artist/title
+credits and filters the search response's embedded releases locally.
+There are **no per-recording release browse requests**. Only distinct eligible
+album groups missing original metadata are looked up (cached within the track)
+to verify the original album title, artist and first-release year. If that
+metadata is already embedded, the search alone is sufficient.
+A recording's first-release date might be
+a single's date, and an embedded release might be a later reissue, so neither
+is used as a substitute for the album group's original year.
+The search deliberately does not use `-secondarytype:*`: the indexed fields
+describe *any* release containing the recording, so this could exclude an original
+studio recording merely because it also appears on a compilation. Compilation,
+live and other secondary types are rejected on the embedded releases instead.
 It selects the earliest studio album release group, excluding compilations,
 live albums, remixes, singles and other secondary release types. Original
-release-group names and years replace the compilation album and year in track
-YAML. The source year is a hint: albums newer than that year are excluded, and
-an exact year can disambiguate distinct recordings. Multiple unresolved album
+release-group names and earliest years replace the compilation album and year in
+track YAML. The oldest eligible album year is selected across all matching
+recordings, not just within each recording. The source year is only an upper
+bound: albums newer than that year are excluded; it never favors a later reissue
+over an earlier original album. Recognizable trailing edition labels such as
+`(Deluxe Edition)`, `[2011 Remastered]`, and `- 25th Anniversary Edition` are
+removed from destination directory names and album/track YAML titles.
+Meaningful title text such as `(Part II)` is retained. Edition groups with the
+same normalized original title and year are treated as the same album.
+Different oldest album titles in the same year remain ambiguous. Multiple unresolved album
 groups, unlabelled alternative recordings and incomplete catalog results are
 handled conservatively; uncertain tracks remain in place. Explicitly
 disambiguated live/remix/demo recordings are skipped rather than assumed to be
@@ -677,9 +697,11 @@ Requests are rate-limited with bounded retries; network failures stop the run
 without moving the track. No API key or LLM service is required.
 
 Logs include timestamps, settings, per-track progress, recording search counts,
-recording IDs being examined, release pagination and rejection-reason totals
+recording IDs being examined locally, embedded release counts and rejection-reason totals
 (such as compilation/live releases or mismatched artist credits). One local
-track may match multiple MusicBrainz recordings, each requiring release lookups;
+track may match multiple MusicBrainz recordings, all filtered from the search
+response without individual recording requests; distinct album groups require
+original-metadata lookups instead.
 `--count` limits tracks, not API requests. Rate-limit waits are shown at INFO.
 For example, `--sleep 10` enforces at least 10 seconds between request starts;
 a logged `Retry-After` backoff of 1 second may be followed by a further pacing
@@ -693,8 +715,12 @@ punctuation-normalizing rules as `track-yaml-auto-create`. New albums use
 `Album [YYYY]` names. All same-basename media, lyrics and other sidecars move
 together; YAML-only tracks are supported. Filenames are retained. The script
 preserves track metadata/comments, updates artist/albumartist/album/year and
-collection-relative media paths, and creates or fills missing destination album metadata while
-preserving existing album fields. Shared source album metadata/artwork and
+collection-relative media paths, and creates or updates destination album
+metadata with the original name and year. Equivalent edition-labelled album
+names are corrected; unrelated album names are never overwritten. When correcting
+a different release year, edition-specific month/day values are removed;
+otherwise existing release dates and other album fields are preserved.
+Shared source album metadata/artwork and
 empty source directories are left untouched. Existing destination tracks are
 never overwritten. Originals are removed only after destination files and YAML
 have been written; filesystem errors trigger rollback. Embedded media tags are

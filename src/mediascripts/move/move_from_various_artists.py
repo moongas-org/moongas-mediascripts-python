@@ -163,14 +163,58 @@ def catalogue_id(record: Mapping[str, object]) -> str:
     return identifier
 
 
+EDITION_LABEL = re.compile(
+    r"(?=.*\b(?:deluxe|edition|remaster(?:ed)?|anniversary|expanded|bonus)\b)"
+    r"(?:(?:\d{4}|\d+(?:st|nd|rd|th)?|super|deluxe|special|expanded|extended|"
+    r"limited|collector'?s?|collectors'?|anniversary|edition|version|remaster(?:ed)?|"
+    r"digitally|digital|bonus|tracks?|disc|with|and|the|of|original|release)"
+    r"(?:[\s,/:+&-]+|$))+",
+    re.IGNORECASE,
+)
+
+
+def original_album_title(title: str) -> str:
+    """Remove only recognizable trailing edition labels, not title parentheses."""
+    original = title.strip()
+    cleaned = original
+    while True:
+        suffix = re.search(r"\s*[\(\[]([^\(\)\[\]]+)[\)\]]\s*$", cleaned)
+        if suffix is not None and EDITION_LABEL.fullmatch(suffix[1].strip()):
+            candidate = cleaned[:suffix.start()].strip()
+        else:
+            separators = [
+                separator for separator in re.finditer(r"\s+[-\u2013\u2014:]\s+", cleaned)
+                if EDITION_LABEL.fullmatch(cleaned[separator.end():].strip())
+            ]
+            if not separators:
+                break
+            candidate = cleaned[:separators[-1].start()].strip()
+        if not candidate:
+            break
+        cleaned = candidate
+    if cleaned != original:
+        logger.info("Original album title: %r -> %r (removed edition labels)", original, cleaned)
+    return cleaned
+
+
 def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, str]:
     """Resolve exact artist/title matches to original official studio album groups."""
     artist_key = directory_name_key(values["artist"])
     title_key = directory_name_key(values["title"])
     year_hint = int(values["year"]) if values["year"] else None
+    query = (
+        f"artist:{lucene_phrase(values['artist'])} AND recording:{lucene_phrase(values['title'])}"
+        " AND primarytype:album AND status:official"
+    )
+    if year_hint is not None:
+        query += f" AND firstreleasedate:[* TO {year_hint}-12-31]"
+    logger.info(
+        "Searching studio album candidates using embedded releases; no per-recording release requests. "
+        "Only distinct eligible album groups missing original metadata require title/year lookups."
+    )
     result = catalogue.get(
         "recording",
-        query=f"artist:{lucene_phrase(values['artist'])} AND recording:{lucene_phrase(values['title'])}",
+        query=query,
         limit="100",
     )
     recordings = catalogue_items(result, "recordings")
@@ -184,6 +228,7 @@ def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, 
     if type(count) is not int or count > len(recordings):
         raise ValueError("MusicBrainz recording search is incomplete; cannot choose safely")
     groups: dict[str, dict[str, object]] = {}
+    group_lookups = 0
     candidates: list[tuple[str, str, str, str]] = []
     rejected_recordings: Counter[str] = Counter()
     examined = 0
@@ -209,31 +254,12 @@ def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, 
         examined += 1
         logger.info(
             "Examining recording %d/%d: id=%s title=%r first-release-date=%s; "
-            "browsing releases for this recording (still the same local track)",
+            "filtering embedded releases locally (no request for this recording)",
             index, len(recordings), recording_id, recording.get("title"),
             recording.get("first-release-date", "unknown"),
         )
-        releases: list[dict[str, object]] = []
-        for offset in range(0, 1000, 100):
-            page = catalogue.get(
-                "release", recording=recording_id, inc="artist-credits+release-groups",
-                limit="100", offset=str(offset),
-            )
-            batch = catalogue_items(page, "releases")
-            releases.extend(batch)
-            total = page.get("release-count")
-            if type(total) is not int:
-                raise ValueError("MusicBrainz release count is missing")
-            logger.info(
-                "Recording %s releases: page offset=%d returned=%d; collected=%d/%d",
-                recording_id, offset, len(batch), len(releases), total,
-            )
-            if len(releases) >= total:
-                break
-            if not batch:
-                raise ValueError("MusicBrainz release listing ended before its reported count")
-        else:
-            raise ValueError("Too many releases to resolve this recording safely")
+        releases = catalogue_items(recording, "releases")
+        logger.info("Recording %s: %d embedded release(s)", recording_id, len(releases))
         album_options: dict[str, tuple[str, str, str, str]] = {}
         rejected_releases: Counter[str] = Counter()
         for release in releases:
@@ -241,7 +267,7 @@ def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, 
             reason = ""
             if release.get("status") != "Official":
                 reason = "not Official"
-            elif artist_key not in credited_names(release):
+            elif "artist-credit" in release and artist_key not in credited_names(release):
                 reason = "artist credit mismatch or multiple artists"
             elif not is_mapping(group):
                 reason = "missing release group"
@@ -260,8 +286,13 @@ def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, 
                 raise ValueError("Expected a release group mapping")
             group_id = catalogue_id(group)
             if group_id not in groups:
-                logger.info("Looking up eligible studio album release-group=%s title=%r", group_id, group.get("title"))
-                groups[group_id] = catalogue.get(f"release-group/{group_id}", inc="artist-credits")
+                if all(field in group for field in ("title", "first-release-date", "artist-credit")):
+                    logger.info("Using embedded original album metadata for release-group=%s", group_id)
+                    groups[group_id] = group
+                else:
+                    logger.info("Looking up eligible studio album release-group=%s title=%r", group_id, group.get("title"))
+                    groups[group_id] = catalogue.get(f"release-group/{group_id}", inc="artist-credits")
+                    group_lookups += 1
             else:
                 logger.debug("Reusing cached release-group=%s", group_id)
             details = groups[group_id]
@@ -278,9 +309,10 @@ def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, 
             if year_hint is not None and int(date[:4]) > year_hint:
                 rejected_releases["album newer than source year hint"] += 1
                 continue
+            title = original_album_title(title)
             if group_id not in album_options:
-                logger.info("Eligible studio album: %r [%s] release-group=%s", title.strip(), date[:4], group_id)
-            album_options[group_id] = (date, title.strip(), group_id, recording_id)
+                logger.info("Eligible studio album: %r [%s] release-group=%s", title, date[:4], group_id)
+            album_options[group_id] = (date, title, group_id, recording_id)
         logger.info(
             "Recording %s release filtering: %d release(s), %d eligible studio album group(s); rejected=%s",
             recording_id, len(releases), len(album_options), dict(rejected_releases),
@@ -293,24 +325,30 @@ def original_album(values: dict[str, str], catalogue: MusicBrainz) -> dict[str, 
                 "Recording %s earliest studio album year=%s; retained=%s",
                 recording_id, earliest, [option[1] for option in earliest_options],
             )
-    # Distinct recordings with different source albums need a year match to disambiguate.
     by_group = {option[2]: option for option in candidates}
     logger.info(
-        "Recording search summary: %d examined, %d rejected (%s); %d distinct earliest studio album group(s)",
-        examined, sum(rejected_recordings.values()), dict(rejected_recordings), len(by_group),
+        "Recording search summary: %d examined locally, %d rejected (%s); "
+        "%d distinct album group lookup(s); %d distinct earliest studio album group(s)",
+        examined, sum(rejected_recordings.values()), dict(rejected_recordings), group_lookups, len(by_group),
     )
-    if len(by_group) > 1 and year_hint is not None:
-        exact_year = {key: option for key, option in by_group.items() if int(option[0][:4]) == year_hint}
-        if exact_year:
-            logger.info("Year hint %d narrows album groups from %d to %d", year_hint, len(by_group), len(exact_year))
-            by_group = exact_year
-    if len(by_group) != 1:
+    # Compilation/reissue years must not override an earlier original album.
+    earliest_year = min((option[0][:4] for option in by_group.values()), default=None)
+    oldest = [option for option in by_group.values() if option[0][:4] == earliest_year]
+    by_title: dict[str, tuple[str, str, str, str]] = {}
+    for option in sorted(oldest):
+        by_title.setdefault(directory_name_key(option[1]), option)
+    logger.info(
+        "Oldest album selection: year=%s; %d group(s) reduce to %d original title(s); "
+        "source year is an upper bound, not a preference for a reissue",
+        earliest_year or "unknown", len(oldest), len(by_title),
+    )
+    if len(by_title) != 1:
         logger.warning(
             "Unresolved album candidates: %s",
-            [{"album": option[1], "date": option[0], "release-group": option[2]} for option in by_group.values()],
+            [{"album": option[1], "date": option[0], "release-group": option[2]} for option in by_title.values()],
         )
-        raise ValueError(f"No unambiguous original studio album found ({len(by_group)} candidates)")
-    date, album, group_id, recording_id = next(iter(by_group.values()))
+        raise ValueError(f"No unambiguous original studio album found ({len(by_title)} candidates)")
+    date, album, group_id, recording_id = next(iter(by_title.values()))
     logger.info(
         "Resolved %s - %s (source year %s) to %s [%s]; MusicBrainz recording=%s release-group=%s",
         values["artist"], values["title"], values["year"] or "unknown", album, date[:4],
@@ -413,16 +451,22 @@ def move_track(
     album_document = yaml_document(album_yaml if album_original is not None else None)
     album_before = deepcopy(album_document)
     album_data = metadata(album_document, "albumData", "album_data")
-    if album_data.get("name") and directory_name_key(str(album_data["name"])) != directory_name_key(values["album"]):
+    if (album_data.get("name")
+            and directory_name_key(original_album_title(str(album_data["name"]))) != directory_name_key(values["album"])):
         raise ValueError(f"Destination album YAML names a different album: {album_yaml}")
-    if not album_data.get("name"):
-        album_data["name"] = values["album"]
+    album_data["name"] = values["album"]
     release_key = "date_released" if "date_released" in album_data else "dateReleased"
     release_date = album_data.get(release_key)
     if release_date is None:
         album_data[release_key] = {"y": int(values["year"])}
-    elif not is_mapping(release_date) or release_date.get("y") != int(values["year"]):
-        raise ValueError(f"Destination album YAML has a conflicting release year: {album_yaml}")
+    elif not is_mapping(release_date):
+        raise ValueError(f"Destination album YAML has an invalid release date: {album_yaml}")
+    elif release_date.get("y") != int(values["year"]):
+        logger.info(
+            "[%s] Correcting album release year from %s to original year %s; discarding edition-specific month/day",
+            album_yaml, release_date.get("y"), values["year"],
+        )
+        album_data[release_key] = {"y": int(values["year"])}
     if "explicitCover" not in album_data and "explicit_cover" not in album_data:
         album_data["explicitCover"] = False
     album_content = (
