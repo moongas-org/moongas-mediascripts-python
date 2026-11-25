@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import time
-import unicodedata
 from collections.abc import Iterator, Mapping
 from functools import partial
 from html.parser import HTMLParser
@@ -32,7 +31,13 @@ from yaml import YAMLError
 from mediascripts.acoustid.musicbrainz import USER_AGENT, is_recording_id
 from mediascripts.common.cli.parse_boolean import parse_boolean
 from mediascripts.common.files import album_directory, directory_name_key, path_component
-from mediascripts.common.musicbrainz import MusicBrainz, lucene_phrase
+from mediascripts.common.musicbrainz import (
+    MAX_ATTEMPTS,
+    MAX_RETRY_DELAY,
+    MusicBrainz,
+    lucene_phrase,
+    validate_retry_options,
+)
 from mediascripts.common.openai.client import MODEL_NAME, get_client
 from mediascripts.lyrics.lyrics_common import MEDIA_EXTENSIONS
 from mediascripts.mediafile.auto_tag_media_file import load_media, read_track_values, text_values, unescape_name
@@ -257,35 +262,19 @@ def ask_model(client: OpenAI, system: str, prompt: str) -> dict[str, object]:
     return result
 
 
-def fuzzy_terms(field: str, value: str) -> str:
-    normalized = "".join(
-        char for char in unicodedata.normalize("NFKD", value) if not unicodedata.combining(char)
-    )
-    tokens = re.findall(r"[^\W_]+", normalized, re.UNICODE)
-    if not tokens:
-        raise ValueError(f"No searchable words in {field}: {value!r}")
-    return "(" + " AND ".join(f"{field}:{token}~1" for token in tokens) + ")"
-
-
 def search_candidates(
-    catalogue: MusicBrainz, entity: str, artist: str, title: str, *, year: int | None = None,
+    catalogue: MusicBrainz, entity: str, artist: str, title: str,
 ) -> list[dict[str, object]]:
-    queries = [
-        ("exact artist/title", f"artist:{lucene_phrase(artist)} AND {entity}:{lucene_phrase(title)}"),
-        ("fuzzy artist/title", f"{fuzzy_terms('artist', artist)} AND {fuzzy_terms(entity, title)}"),
-        ("fuzzy title without artist filter", fuzzy_terms(entity, title)),
-    ]
-    for stage, query in queries:
-        if year is not None:
-            query += f" AND date:{year}*"
-        logger.info("MusicBrainz search strategy: %s", stage)
-        result = catalogue.get(entity, query=query, limit="10")
-        candidates = mapping_list(result.get(f"{entity}s"), f"MusicBrainz {entity}s")
-        logger.info("MusicBrainz search returned %d %s candidate(s)", len(candidates), entity)
-        if candidates:
-            return candidates
-        logger.warning("No candidates for %s search: artist=%r, title=%r", stage, artist, title)
-    raise ValueError(f"No MusicBrainz matches after {len(queries)} search strategies for {artist} - {title}")
+    query = f"artist:{lucene_phrase(artist)} AND {entity}:{lucene_phrase(title)}"
+    logger.info("MusicBrainz search: quoted artist/title only; no fuzzy fallback")
+    result = catalogue.get(entity, query=query, limit="10")
+    if "error" in result:
+        raise ValueError(f"MusicBrainz search error: {result['error']}")
+    candidates = mapping_list(result.get(f"{entity}s"), f"MusicBrainz {entity}s")
+    logger.info("MusicBrainz search returned %d %s candidate(s)", len(candidates), entity)
+    if not candidates:
+        raise ValueError(f"No MusicBrainz matches for {artist} - {title}; search was not broadened")
+    return candidates
 
 
 def selection_options(
@@ -680,7 +669,7 @@ def infer_album_identity(album: Path, *, artist_scope: bool = False) -> tuple[st
 def resolve_album(
     artist: str, title: str, year: int, client: OpenAI, catalogue: MusicBrainz,
 ) -> tuple[dict[str, object], str]:
-    candidates = search_candidates(catalogue, "release", artist, title, year=year)
+    candidates = search_candidates(catalogue, "release", artist, title)
     # Missing search dates may be filled by the release lookup; known wrong years are never selected.
     candidates = [item for item in candidates if not item.get("date") or str(item["date"])[:4] == str(year)]
     options, identifiers = selection_options(candidates, "album")
@@ -759,16 +748,20 @@ def missing_album_tracks(
 def directory_loop(
     directory: Path, sleep_between_files: int = 30, llm_enabled: bool = True,
     force: bool = False, dry_run: bool = False, count: int | None = None,
+    *, max_attempts: int = MAX_ATTEMPTS, retry_delay: float = 2.0,
+    max_retry_delay: float = MAX_RETRY_DELAY,
 ) -> bool:
     if sleep_between_files < 0 or (count is not None and count < 0):
         raise ValueError("sleep and count must be non-negative")
+    catalogue = MusicBrainz(
+        max_attempts=max_attempts, retry_delay=retry_delay, max_retry_delay=max_retry_delay,
+    )
     albums = scoped_album_directories(directory)
     logger.info("Directory mode: %s; %d album(s); request files are not read", directory, len(albums))
     if force:
         logger.info("Directory mode only creates missing track YAML; --force does not refresh existing files")
     succeeded = True
     client: OpenAI | None = None
-    catalogue = MusicBrainz()
     for index, album in enumerate(albums):
         if count is not None and index >= count:
             break
@@ -1025,15 +1018,22 @@ def default_destination() -> Path:
 def main_loop(
     specific_file: Path, specific_dir: Path | None = None, sleep_between_files: int = 30,
     llm_enabled: bool = True, force: bool = False, dry_run: bool = False, count: int | None = None,
-    *, target_dir: Path | None = None,
+    *, target_dir: Path | None = None, max_attempts: int = MAX_ATTEMPTS,
+    retry_delay: float = 2.0, max_retry_delay: float = MAX_RETRY_DELAY,
 ) -> bool:
     if target_dir is not None:
         if specific_dir is not None:
             raise ValueError("A scoped directory cannot be combined with a destination override")
-        return directory_loop(target_dir, sleep_between_files, llm_enabled, force, dry_run, count)
+        return directory_loop(
+            target_dir, sleep_between_files, llm_enabled, force, dry_run, count,
+            max_attempts=max_attempts, retry_delay=retry_delay, max_retry_delay=max_retry_delay,
+        )
     started = time.perf_counter()
     if sleep_between_files < 0 or (count is not None and count < 0):
         raise ValueError("sleep and count must be non-negative")
+    catalogue = MusicBrainz(
+        max_attempts=max_attempts, retry_delay=retry_delay, max_retry_delay=max_retry_delay,
+    )
     if not specific_file.is_file():
         raise ValueError(f"Input file does not exist: {specific_file}")
     use_collection_roots = specific_dir is None
@@ -1066,7 +1066,6 @@ def main_loop(
         save_input_snapshot(input_backup, input_content, create_only=not input_backup.exists())
         logger.info("Input file backed up to %s before processing", input_backup)
     client: OpenAI | None = None
-    catalogue = MusicBrainz()
     existing_index: ExistingTrackIndex | None = None
     succeeded = True
     processed = 0
@@ -1160,6 +1159,18 @@ def main() -> int:
         help="Create only missing track YAML in this album directory or albums beneath an artist directory; infer artist, album and year locally.",
     )
     parser.add_argument("--sleep", type=int, default=30, help="Seconds between input lines or directory-mode albums (default: 30).")
+    parser.add_argument(
+        "--max-attempts", type=int, default=MAX_ATTEMPTS,
+        help=f"Total attempts per MusicBrainz request, including the first (default: {MAX_ATTEMPTS}; 1 disables retries).",
+    )
+    parser.add_argument(
+        "--retry-delay", type=float, default=2.0,
+        help="Initial MusicBrainz retry backoff in seconds, doubled after each failure (default: 2).",
+    )
+    parser.add_argument(
+        "--max-retry-delay", type=float, default=MAX_RETRY_DELAY,
+        help=f"Cap for exponential backoff in seconds; longer Retry-After headers are honored (default: {MAX_RETRY_DELAY:g}).",
+    )
     parser.add_argument("--llm", type=parse_boolean, default=True, metavar="true|false", help="False lists input without requests or writes.")
     parser.add_argument("--force", action="store_true", help="Refresh existing core metadata, keeping identifiers and mediaFileData; back up originals.")
     parser.add_argument("-c", "--count", type=int, help="Process at most this many non-empty lines or directory-mode albums, including failed attempts.")
@@ -1170,14 +1181,23 @@ def main() -> int:
     args = parser.parse_args()
     if args.sleep < 0 or (args.count is not None and args.count < 0):
         parser.error("--sleep and --count must be non-negative")
+    try:
+        validate_retry_options(args.max_attempts, args.retry_delay, args.max_retry_delay)
+    except ValueError as error:
+        parser.error(str(error))
     logging.basicConfig(
         level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(message)s",
+    )
+    logger.info(
+        "MusicBrainz retry settings: max_attempts=%d retry_delay=%.2fs max_retry_delay=%.2fs",
+        args.max_attempts, args.retry_delay, args.max_retry_delay,
     )
     try:
         if args.dir is not None:
             return 0 if directory_loop(
                 args.dir, args.sleep, args.llm, args.force, args.dry_run, args.count,
+                max_attempts=args.max_attempts, retry_delay=args.retry_delay, max_retry_delay=args.max_retry_delay,
             ) else 1
         input_file = args.file
         if input_file is None:
@@ -1188,6 +1208,7 @@ def main() -> int:
             logger.info("Using default input file: %s", input_file)
         return 0 if main_loop(
             input_file, None, args.sleep, args.llm, args.force, args.dry_run, args.count, target_dir=args.dir,
+            max_attempts=args.max_attempts, retry_delay=args.retry_delay, max_retry_delay=args.max_retry_delay,
         ) else 1
     except (APIError, *YAML_ERRORS) as error:
         logger.error("Batch aborted: %s", error, exc_info=logger.isEnabledFor(logging.DEBUG))

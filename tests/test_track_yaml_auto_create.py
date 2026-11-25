@@ -460,7 +460,7 @@ def test_scoped_cli_does_not_read_missing_default_file_or_config(
     query = parse_qs(urlsplit(request.full_url).query)["query"][0]
     assert 'artist:"Artist"' in query
     assert 'release:"Album"' in query
-    assert "date:1995*" in query
+    assert query == 'artist:"Artist" AND release:"Album"'
     assert not (tmp_path / "todo.txt.bak").exists()
 
 
@@ -1321,6 +1321,13 @@ def test_musicbrainz_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
         ["--file", "todo.txt", "--count", "-1"],
         ["--file", "todo.txt", "--dir", "Artist"],
         ["-d", "Artist", "--file", "todo.txt"],
+        ["--max-attempts", "0"],
+        ["--retry-delay", "0"],
+        ["--retry-delay", "-1"],
+        ["--retry-delay", "nan"],
+        ["--retry-delay", "inf"],
+        ["--retry-delay", "10", "--max-retry-delay", "5"],
+        ["--max-retry-delay", "nan"],
     ],
 )
 def test_cli_rejects_invalid_args(
@@ -1353,7 +1360,8 @@ def test_cli_passes_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert populate.main() == 0
     runner.assert_called_once_with(
-        tmp_path / "todo.txt", None, 0, False, True, True, 3, target_dir=None
+        tmp_path / "todo.txt", None, 0, False, True, True, 3, target_dir=None,
+        max_attempts=4, retry_delay=2.0, max_retry_delay=120.0,
     )
 
 
@@ -1895,6 +1903,84 @@ def test_retries_are_bounded_and_failed_input_retained(
         cast(MagicMock, populate.time.sleep).assert_any_call(delay)
 
 
+@pytest.mark.parametrize("directory_mode", [False, True])
+def test_cli_custom_retries_back_off_and_recover_in_both_modes(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    directory_mode: bool,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("Artist - Album (album)\n")
+    (tmp_path / "mediascan-config.yml").write_text("mediaDirs: [/data/Music]\n")
+    album = tmp_path / "data/Music/Artist/Album [1995]"
+    album.mkdir(parents=True)
+    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    _, network = (install_directory_lookup if directory_mode else install_lookup)(monkeypatch, release)
+    responses = list(network.side_effect)
+    network.side_effect = [http_error(503, "1"), http_error(429), http_error(503), *responses]
+    monkeypatch.setattr(sys, "argv", [
+        "track-yaml-auto-create", "--dir" if directory_mode else "--file", str(album if directory_mode else source),
+        "--max-attempts", "5", "--retry-delay", "3", "--max-retry-delay", "5",
+    ])
+    assert populate.main() == 0
+    assert network.call_count == 5
+    assert (album / "01 - First.yml").is_file()
+    sleeps = cast(MagicMock, populate.time.sleep)
+    backoffs = [call.args[0] for call in sleeps.call_args_list if call.args[0] >= 3]
+    assert backoffs == [3.0, 5.0, 5.0]
+    urls = [call.args[0].full_url for call in network.call_args_list[:4]]
+    assert len(set(urls)) == 1
+    assert source.read_text() == ("Artist - Album (album)\n" if directory_mode else "")
+
+
+@pytest.mark.parametrize("directory_mode", [False, True])
+def test_custom_attempt_limit_can_disable_retries(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    directory_mode: bool,
+) -> None:
+    source = tmp_path / "todo.txt"
+    original = "Artist - Album (album)\n"
+    source.write_text(original)
+    album = tmp_path / "Artist/Album [1995]"
+    album.mkdir(parents=True)
+    _, network = (install_directory_lookup if directory_mode else install_lookup)(monkeypatch, release)
+    network.side_effect = http_error(503)
+    if directory_mode:
+        assert not populate.directory_loop(album, max_attempts=1)
+    else:
+        assert not populate.main_loop(source, tmp_path / "Music", max_attempts=1)
+    network.assert_called_once()
+    assert source.read_text() == original
+    assert not list(album.iterdir())
+    cast(MagicMock, populate.time.sleep).assert_not_called()
+
+
+def test_main_loop_forwards_retry_options_to_directory_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = MagicMock(return_value=True)
+    monkeypatch.setattr(populate, "directory_loop", runner)
+    assert populate.main_loop(
+        tmp_path / "missing.txt", target_dir=tmp_path, max_attempts=7, retry_delay=4, max_retry_delay=20,
+    )
+    runner.assert_called_once_with(
+        tmp_path, 30, True, False, False, None, max_attempts=7, retry_delay=4, max_retry_delay=20,
+    )
+
+
+@pytest.mark.parametrize("payload", [
+    b"", b"not JSON", b"[]", b'{"error": "Search service failed"}', b"{}", b'{"releases": null}',
+])
+def test_invalid_search_response_is_not_reported_as_no_matches(
+    monkeypatch: pytest.MonkeyPatch, payload: bytes,
+) -> None:
+    network = MagicMock(return_value=BytesIO(payload))
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    with pytest.raises(ValueError) as error:
+        populate.search_candidates(populate.MusicBrainz(), "release", "Paul McCartney", "McCartney II")
+    assert "No MusicBrainz matches" not in str(error.value)
+    network.assert_called_once()
+
+
 @pytest.mark.parametrize(
     "header,expected", [("7", 7.0), ("999999", 999999.0), ("0", 2.0), ("1", 2.0), ("invalid", 2.0)]
 )
@@ -1936,35 +2022,7 @@ def test_invalid_catalogue_response_not_retried(
     network.assert_called_once()
 
 
-@pytest.mark.parametrize("successful_stage", [1, 2])
-def test_empty_search_uses_broader_fallback_then_completes(
-    tmp_path: Path,
-    release: dict[str, object],
-    monkeypatch: pytest.MonkeyPatch,
-    successful_stage: int,
-) -> None:
-    source = tmp_path / "todo.txt"
-    source.write_text("Esplendor Geometrico - Muerte a Escalia Industrial\n")
-    client, network = install_lookup(monkeypatch, release, kind="track")
-    client.chat.completions.create.side_effect = model_client(
-        "kind: track\nartist: Esplendor Geométrico\ntitle: Muerte a Escalía Industrial",
-        f"releaseId: {RELEASE_ID}\nrecordingId: {RECORDING_ID}\ngenre: Industrial",
-    ).chat.completions.create.side_effect
-    responses = list(network.side_effect)
-    network.side_effect = [
-        BytesIO(b'{"recordings": []}') for _ in range(successful_stage)
-    ] + responses
-    assert populate.main_loop(source, tmp_path / "Music")
-    assert source.read_text() == ""
-    assert network.call_count == successful_stage + 2
-    urls = [call.args[0].full_url for call in network.call_args_list]
-    assert "Escalia~1" in urls[1]
-    if successful_stage == 2:
-        assert "artist" not in urls[2]
-    assert client.chat.completions.create.call_count == 2
-
-
-def test_all_search_strategies_exhausted_without_selection(
+def test_empty_search_does_not_broaden_or_select(
     tmp_path: Path,
     release: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
@@ -1972,22 +2030,31 @@ def test_all_search_strategies_exhausted_without_selection(
     source = tmp_path / "todo.txt"
     source.write_text("Converter - Conquerer\n")
     client, network = install_lookup(monkeypatch, release, kind="track")
-    network.side_effect = [BytesIO(b'{"recordings": []}') for _ in range(3)]
+    network.side_effect = [BytesIO(b'{"recordings": []}')]
     assert not populate.main_loop(source, tmp_path / "Music")
-    assert network.call_count == 3
+    assert network.call_count == 1
     assert client.chat.completions.create.call_count == 1
     assert source.read_text() == "Converter - Conquerer\n"
 
 
-def test_fuzzy_search_does_not_inject_lucene_operators() -> None:
-    query = populate.fuzzy_terms("recording", 'Escalía: "title" +evil* -other')
-    assert (
-        query
-        == "(recording:Escalia~1 AND recording:title~1 AND recording:evil~1 AND recording:other~1)"
+def test_release_query_is_minimal_and_encoded_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    network = MagicMock(return_value=BytesIO(b'{"releases": [{"title": "McCartney II"}]}'))
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    assert populate.search_candidates(
+        populate.MusicBrainz(), "release", "Paul McCartney", "McCartney II",
+    ) == [{"title": "McCartney II"}]
+    request = network.call_args.args[0]
+    assert isinstance(request, Request)
+    assert request.full_url == (
+        "https://musicbrainz.org/ws/2/release?"
+        "query=artist%3A%22Paul+McCartney%22+AND+release%3A%22McCartney+II%22&limit=10&fmt=json"
     )
+    assert request.get_header("User-agent") == populate.USER_AGENT
+    assert "https://github.com/moongas-org/" in populate.USER_AGENT
+    assert request.get_header("Accept") == "application/json"
 
 
-def test_broad_search_can_be_rejected_without_writing(
+def test_search_can_be_rejected_without_writing(
     tmp_path: Path,
     release: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
@@ -2000,8 +2067,6 @@ def test_broad_search_can_be_rejected_without_writing(
         "error: Results belong to another artist",
     ).chat.completions.create.side_effect
     network.side_effect = [
-        BytesIO(b'{"recordings": []}'),
-        BytesIO(b'{"recordings": []}'),
         BytesIO(
             json.dumps(
                 {"recordings": [{"id": RECORDING_ID, "title": "Unrelated"}]}
@@ -2009,7 +2074,7 @@ def test_broad_search_can_be_rejected_without_writing(
         ),
     ]
     assert not populate.main_loop(source, tmp_path / "Music")
-    assert network.call_count == 3
+    assert network.call_count == 1
     assert source.read_text() == "Unknown - Title\n"
     assert not (tmp_path / "Music").exists()
 

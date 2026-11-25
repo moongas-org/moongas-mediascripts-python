@@ -1107,8 +1107,11 @@ then the album directory name with its trailing `[YYYY]` removed and used as
 the year. Directory unescaping restores underscores to periods, which is
 necessarily best-effort. Malformed or conflicting metadata is reported, not
 silently guessed.
-Each identified album is searched by artist, title and year; the selected
-release must match all three. New files stay in the existing album directory
+Each identified album is searched using quoted artist/title phrases only,
+without fuzzy terms or a date clause. The inferred year is used to filter returned
+candidates and validate the selected release locally, rather than restricting
+the search by a specific release-event date. The selected release must match
+artist, title and year. New files stay in the existing album directory
 even when its spelling differs from the catalogue. Existing track YAML is
 preserved, including tracks with nonstandard filenames matched by title.
 When matching local media exists, its basename is used for the new YAML sidecar.
@@ -1147,10 +1150,11 @@ remain in the input file with a warning. A playlist must be identifiable as an
 album; arbitrary mixed playlists are not imported as a collection of videos.
 Artist-only requests resolve the artist via MusicBrainz and choose the recording
 with the highest ListenBrainz total listen count; missing popularity data is an
-error, not a guessed selection. If the exact artist/title query
-returns no candidates, it tries accent-normalized, fuzzy word searches with the
-artist filter, then without it. Each strategy returns at most ten candidates;
-the LLM must still reject unrelated artists, recordings and editions.
+error, not a guessed selection. Searches use quoted artist/title phrases,
+for example `artist:"Paul McCartney" AND release:"McCartney II"`, with at most
+ten candidates. There are no fuzzy searches, date clauses, or fallbacks removing
+the artist filter. An empty result leaves the request pending; the search is
+not broadened. The LLM must still reject unrelated artists, recordings and editions.
 The LLM selects from numbered recording/release pairs rather than copying
 MusicBrainz IDs; the command resolves those numbers back to the original
 catalogue IDs. Invalid selections are retried up to three times, then the
@@ -1207,11 +1211,24 @@ including failed attempts, and failures do not prevent later albums being tried.
 `--sleep` defaults to 30 seconds between lines or directory-mode album attempts.
 MusicBrainz calls are additionally paced at just over one second apart.
 Temporary HTTP 429/500/502/503/504 responses and connection/timeout failures are
-retried up to four total attempts per catalogue request, with 2/4/8-second
-backoff. A valid `Retry-After` header (seconds or HTTP date) overrides that
-backoff, capped at 120 seconds; ordinary rate-limit pacing still applies.
+retried up to `--max-attempts` total attempts per catalogue request (default: 4;
+1 disables retries), in both file and directory modes. `--retry-delay` sets the
+initial exponential backoff (default: 2 seconds); it doubles after each failure,
+capped by `--max-retry-delay` (default: 120 seconds). Default waits are 2/4/8 seconds.
+A valid `Retry-After` header (seconds or HTTP date) is a minimum wait: it never
+shortens backoff and may exceed the cap. Ordinary rate-limit pacing still applies.
+For a busy server, for example:
+
+```bash
+track-yaml-auto-create --dir "/path/to/Artist/Album [1980]" \
+  --max-attempts 8 --retry-delay 10 --max-retry-delay 120
+```
+
+Requests identify the application and project URL in `User-Agent`, request JSON,
+and URL-encode the query once. Empty or malformed bodies, error responses, and
+missing result lists are errors, not zero-match results.
 Other HTTP errors and malformed catalogue responses fail without retries.
-Search strategies, failed attempts, and retry delays are logged explicitly.
+Search result counts, failed attempts, and retry delays are logged explicitly.
 Lines are not shuffled. Before lookups in a normal run, the command atomically
 copies the input to a sibling `.bak` file (for example `todo.txt.bak`), replacing
 the previous run's backup. After successfully handling all track files for a
