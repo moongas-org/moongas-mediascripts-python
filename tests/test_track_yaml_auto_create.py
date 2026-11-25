@@ -572,6 +572,45 @@ def test_reuses_case_and_spacing_variants_without_creating_directories(
     assert _track_data(tracks[0][1])["album"] == "The Vertigo of Bliss"
 
 
+def test_reuses_unicode_artist_and_album_case_variants(
+    tmp_path: Path, release: dict[str, object],
+) -> None:
+    artist = "Julión Álvarez y su Norteño Banda"
+    album = tmp_path / artist / "Mi Verdad [1995]"
+    album.mkdir(parents=True)
+    release["artist-credit"] = [{"name": "Julión Álvarez Y Su Norteño Banda"}]
+    release["title"] = "MI VERDAD"
+
+    tracks = populate.build_tracks(release, None, "Classic Rock", tmp_path)
+    populate.save_tracks(tracks, tmp_path)
+
+    assert all(path.parent == album for path, _ in tracks)
+    assert sorted(path.name for path in tmp_path.iterdir()) == [artist]
+    assert len(list(album.glob("*.yml"))) == 2
+
+
+def test_batch_reuses_unicode_artist_and_album_case_variants(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "todo.txt"
+    source.write_text("Julión Álvarez - Mi Verdad (album)\n", encoding="utf-8")
+    destination = tmp_path / "Music"
+    artist = "Julión Álvarez y su Norteño Banda"
+    album = destination / artist / "Mi Verdad [1995]"
+    album.mkdir(parents=True)
+    release["artist-credit"] = [{"name": "Julión Álvarez Y Su Norteño Banda"}]
+    release["title"] = "MI VERDAD"
+    monkeypatch.delenv("MOONGAS_COLLECTION_ROOTDIR", raising=False)
+    install_lookup(monkeypatch, release)
+
+    assert populate.main_loop(source, destination, sleep_between_files=0)
+
+    assert sorted(path.name for path in destination.iterdir()) == [artist]
+    assert sorted(path.name for path in (destination / artist).iterdir()) == ["Mi Verdad [1995]"]
+    assert sorted(path.name for path in album.glob("*.yml")) == ["01 - First.yml", "02 - Second.yml"]
+    assert source.read_text(encoding="utf-8") == ""
+
+
 @pytest.mark.parametrize(
     "artist,album",
     [
