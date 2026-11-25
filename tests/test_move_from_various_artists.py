@@ -1,0 +1,520 @@
+import copy
+import sys
+from pathlib import Path
+from typing import Protocol, cast
+from unittest.mock import MagicMock
+from urllib.error import URLError
+
+import pytest
+from mediascan.types.track.track_yaml_file_validator import is_mapping, validate_track_yaml_content
+from mutagen.id3 import ID3
+
+from mediascripts.move import move_from_various_artists as move
+
+RECORDING = "0c652621-96d6-46bb-a886-b277b87bafd4"
+GROUP = "30cd7bd2-ac63-4dd7-a745-864d298f34cf"
+OTHER_GROUP = "ab25cd2f-ef7b-4569-8530-9d168def1020"
+CREDIT: list[dict[str, object]] = [{"name": "Artist", "artist": {"name": "Artist"}}]
+
+
+class _TagWriter(Protocol):
+    def save(self, filething: Path) -> None: ...
+
+
+@pytest.fixture
+def source(tmp_path: Path) -> Path:
+    album = tmp_path / "data" / "Various  Artists" / "Compilation [2005]"
+    album.mkdir(parents=True)
+    path = album / "01 - Track.yml"
+    path.write_text(
+        "# preserve track comment\n"
+        "trackData:\n"
+        "  artist: Artist\n"
+        "  albumartist: Various Artists\n"
+        "  title: Track\n"
+        "  album: Compilation\n"
+        "  genre: Rock\n"
+        "  year: 2005\n"
+        "mediaFileData:\n"
+        "  - path: /data/Various  Artists/Compilation [2005]/01 - Track.mp3\n"
+        "    size: 123\n"
+    )
+    (album / "album.yml").write_text("albumData: {name: Compilation, explicitCover: true}\n")
+    (album / "cover.jpg").write_bytes(b"shared cover")
+    return path
+
+
+@pytest.fixture
+def responses() -> dict[str, dict[str, object]]:
+    group: dict[str, object] = {"id": GROUP, "primary-type": "Album", "secondary-types": []}
+    release: dict[str, object] = {
+        "status": "Official", "artist-credit": CREDIT, "release-group": group,
+    }
+    return {
+        "recording": {
+            "count": 1,
+            "recordings": [{"id": RECORDING, "title": "Track", "artist-credit": CREDIT}],
+        },
+        "release": {
+            "release-count": 3,
+            "releases": [
+                {**release, "release-group": {**group, "secondary-types": ["Compilation"]}},
+                {**release, "status": "Bootleg"},
+                release,
+            ],
+        },
+        f"release-group/{GROUP}": {
+            **group, "artist-credit": CREDIT, "title": "Original Album", "first-release-date": "1995-04-03",
+        },
+    }
+
+
+@pytest.fixture
+def catalogue(
+    monkeypatch: pytest.MonkeyPatch, responses: dict[str, dict[str, object]],
+) -> MagicMock:
+    client = MagicMock(spec=move.MusicBrainz)
+
+    def get(endpoint: str, **_params: str) -> dict[str, object]:
+        return copy.deepcopy(responses[endpoint])
+
+    client.get.side_effect = get
+    monkeypatch.setattr(move, "MusicBrainz", lambda: client)
+    return client
+
+
+def data_root(source: Path) -> Path:
+    return source.parents[2]
+
+
+def target(source: Path) -> Path:
+    return data_root(source) / "Artist" / "Original Album [1995]" / source.name
+
+
+def core(path: Path) -> dict[str, object]:
+    data = validate_track_yaml_content(path.read_text())["trackData"]
+    assert is_mapping(data)
+    return data
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_moves_one_yaml_track_to_original_album(
+    source: Path, catalogue: MagicMock, dry_run: bool, capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = data_root(source)
+    original = source.read_bytes()
+    sibling = source.with_name("02 - Track.yml")
+    sibling.write_bytes(original)
+    source_album = (source.parent / "album.yml").read_bytes()
+
+    assert move.move_from_various_artists(root, dry_run=dry_run)
+
+    catalogue.get.assert_any_call(
+        "recording", query='artist:"Artist" AND recording:"Track"', limit="100",
+    )
+    assert sibling.read_bytes() == original
+    assert (source.parent / "album.yml").read_bytes() == source_album
+    assert (source.parent / "cover.jpg").read_bytes() == b"shared cover"
+    output = capsys.readouterr().out
+    assert "Original Album" in output and "1995" in output
+    if dry_run:
+        assert source.read_bytes() == original
+        assert not (root / "Artist").exists()
+    else:
+        assert not source.exists()
+        destination = target(source)
+        assert core(destination) == {
+            "artist": "Artist", "albumartist": "Artist", "title": "Track",
+            "album": "Original Album", "genre": "Rock", "year": 1995,
+        }
+        content = destination.read_text()
+        assert content.startswith("# preserve track comment\n")
+        assert "/data/Artist/Original Album [1995]/01 - Track.mp3" in content
+        assert "size: 123" in content
+        album_data = move.yaml_document(destination.parent / "album.yml")["albumData"]
+        assert album_data == {
+            "name": "Original Album", "dateReleased": {"y": 1995}, "explicitCover": False,
+        }
+
+
+def test_moves_all_media_and_lyrics_and_reuses_case_variant_directories(
+    source: Path, catalogue: MagicMock,
+) -> None:
+    media = ID3()
+    move.text_values(media, "artist", "Artist")
+    cast(_TagWriter, media).save(source.with_suffix(".mp3"))
+    source.with_suffix(".txt").write_text("lyrics")
+    source.with_suffix(".lrc").write_text("[00:01.00]lyrics")
+    source.with_suffix(".flac").write_bytes(b"unreadable tags, but YAML and MP3 identify track")
+    destination = data_root(source) / "aRTIST" / "original album [1995]"
+    destination.mkdir(parents=True)
+    album_yaml = destination / "ALBUM.YAML"
+    original_album = (
+        "# preserve album comment\nalbumData:\n  name: Original Album\n"
+        "  dateReleased: {y: 1995, m: 4, d: 3}\n  explicitCover: true\n  genres: [Rock]\n"
+    )
+    album_yaml.write_text(original_album)
+
+    assert move.move_from_various_artists(data_root(source))
+
+    assert not (data_root(source) / "Artist").exists()
+    assert not source.exists()
+    for suffix in (".mp3", ".flac", ".txt", ".lrc", ".yml"):
+        assert (destination / source.with_suffix(suffix).name).is_file()
+        assert not source.with_suffix(suffix).exists()
+    assert (destination / "01 - Track.txt").read_text() == "lyrics"
+    assert album_yaml.read_text() == original_album
+    assert not (destination / "album.yml").exists()
+
+
+def test_generates_yaml_from_tags(source: Path, catalogue: MagicMock) -> None:
+    source.unlink()
+    media_path = source.with_suffix(".mp3")
+    media = ID3()
+    for field, value in {
+        "artist": "Artist", "title": "Track", "album": "Compilation", "year": "2005", "genre": "Rock",
+    }.items():
+        move.text_values(media, field, value)
+    cast(_TagWriter, media).save(media_path)
+    before = media_path.read_bytes()
+    assert move.move_from_various_artists(data_root(source))
+    assert core(target(source))["album"] == "Original Album"
+    assert target(source).with_suffix(".mp3").read_bytes() == before
+
+
+def test_filename_artist_fallback(source: Path, catalogue: MagicMock) -> None:
+    source.unlink()
+    media_path = source.with_name("01 - Artist - Track.mp3")
+    cast(_TagWriter, ID3()).save(media_path)
+    assert move.move_from_various_artists(data_root(source))
+    generated = target(source).with_name("01 - Artist - Track.yml")
+    assert core(generated)["artist"] == "Artist"
+    assert core(generated)["title"] == "Track"
+
+
+def test_artist_prefixed_yaml_title_is_used_when_artist_is_various(source: Path, catalogue: MagicMock) -> None:
+    source.write_text(
+        "trackData: {artist: Various Artists, title: Artist - Track, genre: Rock, year: 2005}\n"
+    )
+    assert move.move_from_various_artists(data_root(source))
+    assert core(target(source))["artist"] == "Artist"
+    assert core(target(source))["title"] == "Track"
+
+
+def test_empty_yaml_placeholders_are_populated(source: Path, catalogue: MagicMock) -> None:
+    source.write_text("")
+    media = ID3()
+    move.text_values(media, "artist", "Artist")
+    move.text_values(media, "title", "Track")
+    cast(_TagWriter, media).save(source.with_suffix(".mp3"))
+    destination = target(source).parent
+    destination.mkdir(parents=True)
+    (destination / "album.yml").touch()
+    assert move.move_from_various_artists(data_root(source))
+    assert core(target(source))["album"] == "Original Album"
+    assert move.yaml_document(destination / "album.yml")["albumData"] == {
+        "name": "Original Album", "dateReleased": {"y": 1995}, "explicitCover": False,
+    }
+
+
+@pytest.mark.parametrize("collision", ["01 - TRACK.yml", "01 - Track.MP3", "01 - Track.txt"])
+def test_destination_collisions_leave_source_untouched(
+    source: Path, catalogue: MagicMock, collision: str,
+) -> None:
+    destination = target(source).parent
+    destination.mkdir(parents=True)
+    existing = destination / collision
+    existing.write_bytes(b"existing file")
+    original = source.read_bytes()
+    assert not move.move_from_various_artists(data_root(source))
+    assert existing.read_bytes() == b"existing file"
+    assert source.read_bytes() == original
+    assert list(destination.iterdir()) == [existing]
+
+
+def test_ambiguous_artist_directories_are_not_duplicated(source: Path, catalogue: MagicMock) -> None:
+    root = data_root(source)
+    (root / "Artist").mkdir()
+    (root / "ARTIST").mkdir()
+    assert not move.move_from_various_artists(root)
+    assert source.exists()
+    assert not (root / "Artist" / "Original Album [1995]").exists()
+
+
+@pytest.mark.parametrize("broken", ["trackData: [broken]", "trackData: {artist: [invalid]}", "trackData: *undefined"])
+def test_invalid_yaml_is_reported_without_changes(
+    source: Path, catalogue: MagicMock, broken: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    source.write_text(broken)
+    assert not move.move_from_various_artists(data_root(source))
+    assert source.read_text() == broken
+    assert "Skipping track" in caplog.text
+    catalogue.get.assert_not_called()
+
+
+def test_conflicting_embedded_artist_is_skipped(source: Path, catalogue: MagicMock) -> None:
+    media = ID3()
+    move.text_values(media, "artist", "Different Artist")
+    cast(_TagWriter, media).save(source.with_suffix(".mp3"))
+    assert not move.move_from_various_artists(data_root(source))
+    catalogue.get.assert_not_called()
+    assert source.exists()
+
+
+@pytest.mark.parametrize("failure", ["copy", "track-yaml", "album-yaml", "source-unlink"])
+def test_filesystem_failure_rolls_back(
+    source: Path, catalogue: MagicMock, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    source.with_suffix(".txt").write_text("lyrics")
+    original = source.read_bytes()
+    real_write = move.write_yaml
+    real_copy = move.copy_exclusively
+    real_unlink = Path.unlink
+
+    def write(path: Path, content: str, *, create_only: bool = False) -> None:
+        if (failure == "track-yaml" and path.name == source.name) or (
+            failure == "album-yaml" and path.name == "album.yml"
+        ):
+            raise OSError("injected write failure")
+        real_write(path, content, create_only=create_only)
+
+    def copy_file(src: Path, dst: Path) -> None:
+        if failure == "copy":
+            raise OSError("injected copy failure")
+        real_copy(src, dst)
+
+    def unlink(path: Path, missing_ok: bool = False) -> None:
+        if failure == "source-unlink" and path == source:
+            raise OSError("injected unlink failure")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(move, "write_yaml", write)
+    monkeypatch.setattr(move, "copy_exclusively", copy_file)
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(OSError, match="injected"):
+        move.move_from_various_artists(data_root(source))
+    assert source.read_bytes() == original
+    assert source.with_suffix(".txt").read_text() == "lyrics"
+    assert not (data_root(source) / "Artist").exists()
+
+
+def test_album_update_failure_restores_existing_album(
+    source: Path, catalogue: MagicMock, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = target(source).parent
+    destination.mkdir(parents=True)
+    album_yaml = destination / "album.yml"
+    original = "# incomplete album\nalbumData: {name: Original Album}\n"
+    album_yaml.write_text(original)
+    real_unlink = Path.unlink
+
+    def unlink(path: Path, missing_ok: bool = False) -> None:
+        if path == source:
+            raise OSError("source is read-only")
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(OSError, match="read-only"):
+        move.move_from_various_artists(data_root(source))
+    assert album_yaml.read_text() == original
+    assert list(destination.iterdir()) == [album_yaml]
+    assert source.exists()
+
+
+def test_network_failure_does_not_move(source: Path, catalogue: MagicMock) -> None:
+    catalogue.get.side_effect = URLError("unavailable")
+    with pytest.raises(URLError):
+        move.move_from_various_artists(data_root(source))
+    assert source.exists()
+    assert not (data_root(source) / "Artist").exists()
+
+
+def test_catalogue_rejects_compilations_and_live_albums(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    responses["release"] = {
+        "release-count": 2,
+        "releases": [
+            {"status": "Official", "artist-credit": CREDIT, "release-group": {
+                "id": GROUP, "primary-type": "Album", "secondary-types": [kind],
+            }}
+            for kind in ("Compilation", "Live")
+        ],
+    }
+    assert not move.move_from_various_artists(data_root(source))
+    assert source.exists()
+    assert catalogue.get.call_count == 2
+
+
+@pytest.mark.parametrize("mutation", ["wrong-title", "wrong-artist", "live", "video", "truncated-search"])
+def test_uncertain_recording_is_not_moved(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]], mutation: str,
+) -> None:
+    recording: dict[str, object] = {"id": RECORDING, "title": "Track", "artist-credit": CREDIT}
+    if mutation == "wrong-title":
+        recording["title"] = "Track (Live)"
+    elif mutation == "wrong-artist":
+        recording["artist-credit"] = [{"name": "Another Artist"}]
+    elif mutation == "live":
+        recording["disambiguation"] = "live"
+    elif mutation == "video":
+        recording["video"] = True
+    responses["recording"] = {"count": 101 if mutation == "truncated-search" else 1, "recordings": [recording]}
+    assert not move.move_from_various_artists(data_root(source))
+    assert source.exists()
+
+
+def test_earliest_album_beats_later_reissue(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    responses["release"] = {
+        "release-count": 2,
+        "releases": [
+            {"status": "Official", "artist-credit": CREDIT, "release-group": {
+                "id": identifier, "primary-type": "Album", "secondary-types": [],
+            }} for identifier in (OTHER_GROUP, GROUP)
+        ],
+    }
+    responses[f"release-group/{OTHER_GROUP}"] = {
+        "id": OTHER_GROUP, "primary-type": "Album", "artist-credit": CREDIT,
+        "title": "Later Album", "first-release-date": "2000",
+    }
+    assert move.move_from_various_artists(data_root(source))
+    assert core(target(source))["year"] == 1995
+
+
+def test_ambiguous_same_year_albums_are_skipped(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    responses["release"] = {
+        "release-count": 2,
+        "releases": [
+            {"status": "Official", "artist-credit": CREDIT, "release-group": {
+                "id": identifier, "primary-type": "Album", "secondary-types": [],
+            }} for identifier in (GROUP, OTHER_GROUP)
+        ],
+    }
+    responses[f"release-group/{OTHER_GROUP}"] = {
+        "id": OTHER_GROUP, "primary-type": "Album", "artist-credit": CREDIT,
+        "title": "Another Album", "first-release-date": "1995",
+    }
+    assert not move.move_from_various_artists(data_root(source))
+    assert source.exists()
+
+
+def test_release_pagination_and_group_cache(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    release: dict[str, object] = {
+        "status": "Official", "artist-credit": CREDIT,
+        "release-group": {"id": GROUP, "primary-type": "Album", "secondary-types": []},
+    }
+
+    def get(endpoint: str, **params: str) -> dict[str, object]:
+        if endpoint == "release":
+            return {
+                "release-count": 101,
+                "releases": [release] * (100 if params["offset"] == "0" else 1),
+            }
+        return copy.deepcopy(responses[endpoint])
+
+    catalogue.get.side_effect = get
+    assert move.move_from_various_artists(data_root(source))
+    catalogue.get.assert_any_call(
+        "release", recording=RECORDING, inc="artist-credits+release-groups", limit="100", offset="100",
+    )
+    assert len([
+        call for call in catalogue.get.call_args_list if call.args[0] == f"release-group/{GROUP}"
+    ]) == 1
+
+
+def test_incomplete_release_listing_is_not_used(
+    source: Path, catalogue: MagicMock, responses: dict[str, dict[str, object]],
+) -> None:
+    responses["release"] = {"release-count": 1, "releases": []}
+    assert not move.move_from_various_artists(data_root(source))
+    assert source.exists()
+
+
+def test_unidentifiable_track_does_not_block_next_track(source: Path, catalogue: MagicMock) -> None:
+    unknown = source.with_name("00 - Unknown.yml")
+    unknown.write_text("trackData: {artist: Various Artists, title: Unknown}\n")
+    assert move.move_from_various_artists(data_root(source))
+    assert unknown.exists()
+    assert not source.exists()
+    assert target(source).exists()
+
+
+def test_nested_library_keeps_destination_artists_in_same_library(source: Path, catalogue: MagicMock) -> None:
+    root = data_root(source)
+    library = root / "Music"
+    library.mkdir()
+    various = source.parent.parent
+    various.rename(library / various.name)
+    nested_source = library / various.name / source.parent.name / source.name
+    nested_source.write_text(nested_source.read_text().replace("/data/", "/data/Music/"))
+    assert move.move_from_various_artists(root)
+    destination = library / "Artist" / "Original Album [1995]" / source.name
+    assert destination.exists()
+    assert "/data/Music/Artist/Original Album [1995]/01 - Track.mp3" in destination.read_text()
+    assert not (root / "Artist").exists()
+
+
+def test_duplicate_yaml_sidecars_are_skipped(source: Path, catalogue: MagicMock) -> None:
+    source.with_suffix(".yaml").write_bytes(source.read_bytes())
+    assert not move.move_from_various_artists(data_root(source))
+    assert source.exists()
+    catalogue.get.assert_not_called()
+
+
+def test_copy_metadata_failure_removes_partial_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("content")
+
+    def fail_stat(_src: Path, _dst: Path) -> None:
+        raise OSError("metadata copy failed")
+
+    monkeypatch.setattr(move.shutil, "copystat", fail_stat)
+    with pytest.raises(OSError, match="metadata copy failed"):
+        move.copy_exclusively(source, destination)
+    assert source.read_text() == "content"
+    assert not destination.exists()
+
+
+def test_cli_reports_network_failure(
+    source: Path, catalogue: MagicMock, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalogue.get.side_effect = URLError("unavailable")
+    monkeypatch.setattr(sys, "argv", ["move-from-various-artists", "--dir", str(data_root(source))])
+    assert move.main() == 1
+    assert source.exists()
+
+
+def test_interrupt_after_source_deletion_restores_original_yaml(
+    source: Path, catalogue: MagicMock, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = source.read_bytes()
+    real_unlink = Path.unlink
+
+    def unlink(path: Path, missing_ok: bool = False) -> None:
+        real_unlink(path, missing_ok=missing_ok)
+        if path == source:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    with pytest.raises(KeyboardInterrupt):
+        move.move_from_various_artists(data_root(source))
+    assert source.read_bytes() == original
+    assert not target(source).exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cli_default_and_dry_run(
+    source: Path, catalogue: MagicMock, monkeypatch: pytest.MonkeyPatch, dry_run: bool,
+) -> None:
+    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(data_root(source).parent))
+    monkeypatch.setattr(sys, "argv", ["move-from-various-artists", *(["-n"] if dry_run else [])])
+    assert move.main() == 0
+    assert source.exists() == dry_run
+    assert target(source).exists() != dry_run

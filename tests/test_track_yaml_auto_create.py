@@ -22,6 +22,7 @@ from yaml.nodes import MappingNode, Node, SequenceNode
 from yaml.loader import SafeLoader
 
 from mediascripts.track.track_yaml import track_yaml_auto_create as populate
+from mediascripts.common import musicbrainz as catalogue_http
 from mediascripts.track.track_yaml.track_yaml_common import (
     TextWriter,
     save_yaml_atomically,
@@ -39,6 +40,14 @@ _TestFunction = TypeVar("_TestFunction", bound=Callable[..., object])
 class _ID3Writer(Protocol):
     def add(self, frame: TCON | TIT2 | TPE1) -> None: ...
     def save(self, filething: Path) -> None: ...
+
+
+@pytest.fixture(autouse=True)
+def prevent_unmocked_catalogue_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_request(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Unexpected unmocked MusicBrainz request")
+
+    monkeypatch.setattr(catalogue_http, "urlopen", unexpected_request)
 
 
 def _new_id3() -> _ID3Writer:
@@ -134,6 +143,7 @@ def install_lookup(
             BytesIO(json.dumps(release).encode()),
         ]
     )
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
     monkeypatch.setattr(populate, "urlopen", network)
     monkeypatch.setattr(populate.time, "sleep", MagicMock())
     return client, network
@@ -809,6 +819,7 @@ def test_no_lookup_modes(
     network = MagicMock()
     monkeypatch.setattr(populate, "get_client", client)
     monkeypatch.setattr(populate, "urlopen", network)
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
     assert populate.main_loop(
         source, tmp_path / "new", llm_enabled=llm_enabled, count=count
     )
@@ -1093,12 +1104,12 @@ def test_musicbrainz_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     sleep = MagicMock()
     monkeypatch.setattr(populate.time, "sleep", sleep)
     monkeypatch.setattr(
-        populate, "urlopen", MagicMock(side_effect=[BytesIO(b"{}"), BytesIO(b"{}")])
+        catalogue_http, "urlopen", MagicMock(side_effect=[BytesIO(b"{}"), BytesIO(b"{}")])
     )
     catalogue = populate.MusicBrainz()
     catalogue.get("release", query="test")
     catalogue.get("release", query="test")
-    sleep.assert_called_once_with(pytest.approx(populate.MIN_SLEEP - 0.25))
+    sleep.assert_called_once_with(pytest.approx(catalogue_http.MIN_SLEEP - 0.25))
 
 
 @pytest.mark.parametrize(
@@ -1187,7 +1198,7 @@ def test_logging_covers_lookup_and_write_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO, logger=populate.__name__)
+    caplog.set_level(logging.INFO)
     source = tmp_path / "todo.txt"
     source.write_text("Artist - Album\n")
     (tmp_path / "mediascan-config.yml").write_text("mediaDirs: [/data/Custom]\n")
@@ -1231,7 +1242,7 @@ def test_logging_reports_write_modes(
     release: dict[str, object],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO, logger=populate.__name__)
+    caplog.set_level(logging.INFO)
     tracks = populate.build_tracks(release, RECORDING_ID, "Classic Rock", tmp_path)
     populate.save_tracks(tracks, tmp_path, dry_run=True)
     assert "0 created, 0 updated, 0 skipped, 0 unchanged, 1 previewed" in caplog.text
@@ -1253,7 +1264,7 @@ def test_debug_logging_includes_response_details_and_failure_traceback(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.DEBUG, logger=populate.__name__)
+    caplog.set_level(logging.DEBUG)
     source = tmp_path / "todo.txt"
     source.write_text("\nArtist - Album\n")
     client, _ = install_lookup(monkeypatch, release)
@@ -1278,7 +1289,7 @@ def test_input_backup_precedes_lookup_and_preserves_exact_bytes(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO, logger=populate.__name__)
+    caplog.set_level(logging.INFO)
     source = tmp_path / "todo.txt"
     original = b"\xef\xbb\xbf \r\nArtist - Album\r\n\r\nkeep this without newline"
     source.write_bytes(original)
@@ -1618,7 +1629,7 @@ def http_error(status: int, retry_after: str | None = None) -> HTTPError:
     )
 
 
-@pytest.mark.parametrize("status", sorted(populate.RETRY_STATUSES))
+@pytest.mark.parametrize("status", sorted(catalogue_http.RETRY_STATUSES))
 def test_transient_musicbrainz_http_error_retried(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1627,7 +1638,7 @@ def test_transient_musicbrainz_http_error_retried(
     network = MagicMock(
         side_effect=[http_error(status), BytesIO(b'{"recordings": []}')]
     )
-    monkeypatch.setattr(populate, "urlopen", network)
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
     sleep = MagicMock()
     monkeypatch.setattr(populate.time, "sleep", sleep)
     assert populate.MusicBrainz().get("recording", query="test") == {"recordings": []}
@@ -1645,7 +1656,7 @@ def test_transient_connection_error_retried(
     monkeypatch: pytest.MonkeyPatch, error: OSError
 ) -> None:
     network = MagicMock(side_effect=[error, BytesIO(b"{}")])
-    monkeypatch.setattr(populate, "urlopen", network)
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
     monkeypatch.setattr(populate.time, "sleep", MagicMock())
     assert populate.MusicBrainz().get("release", query="test") == {}
     assert network.call_count == 2
@@ -1656,7 +1667,7 @@ def test_permanent_musicbrainz_error_not_retried(
     monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
     network = MagicMock(side_effect=http_error(status))
-    monkeypatch.setattr(populate, "urlopen", network)
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
     sleep = MagicMock()
     monkeypatch.setattr(populate.time, "sleep", sleep)
     with pytest.raises(HTTPError):
@@ -1673,9 +1684,9 @@ def test_retries_are_bounded_and_failed_input_retained(
     source = tmp_path / "todo.txt"
     source.write_text("Artist - Album\n")
     _, network = install_lookup(monkeypatch, release)
-    network.side_effect = [http_error(503) for _ in range(populate.MAX_ATTEMPTS)]
+    network.side_effect = [http_error(503) for _ in range(catalogue_http.MAX_ATTEMPTS)]
     assert not populate.main_loop(source, tmp_path / "Music")
-    assert network.call_count == populate.MAX_ATTEMPTS
+    assert network.call_count == catalogue_http.MAX_ATTEMPTS
     assert source.read_text() == "Artist - Album\n"
     assert not (tmp_path / "Music").exists()
     for delay in [2.0, 4.0, 8.0]:
@@ -1691,7 +1702,7 @@ def test_retry_after_seconds_respected(
     expected: float,
 ) -> None:
     monkeypatch.setattr(
-        populate,
+        catalogue_http,
         "urlopen",
         MagicMock(side_effect=[http_error(503, header), BytesIO(b"{}")]),
     )
@@ -1705,11 +1716,11 @@ def test_retry_after_http_date() -> None:
     future = format_datetime(
         datetime.now(timezone.utc) + timedelta(seconds=60), usegmt=True
     )
-    assert 58 <= populate.retry_after_delay(future, 2.0) <= 60
+    assert 58 <= catalogue_http.retry_after_delay(future, 2.0) <= 60
     past = format_datetime(
         datetime.now(timezone.utc) - timedelta(seconds=60), usegmt=True
     )
-    assert populate.retry_after_delay(past, 2.0) == 0
+    assert catalogue_http.retry_after_delay(past, 2.0) == 0
 
 
 @pytest.mark.parametrize("body", [b"not JSON", b"[]"])
@@ -1717,7 +1728,7 @@ def test_invalid_catalogue_response_not_retried(
     monkeypatch: pytest.MonkeyPatch, body: bytes
 ) -> None:
     network = MagicMock(return_value=BytesIO(body))
-    monkeypatch.setattr(populate, "urlopen", network)
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
     with pytest.raises(ValueError):
         populate.MusicBrainz().get("release", query="test")
     network.assert_called_once()
@@ -1917,16 +1928,14 @@ def test_unavailable_popularity_keeps_request(
     source.write_text("Artist\n")
     client = model_client("kind: artist\nartist: Artist", f"artistId: {artist_id}")
     monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, client))
-    monkeypatch.setattr(
-        populate,
-        "urlopen",
-        MagicMock(
-            side_effect=[
-                BytesIO(json.dumps({"artists": [{"id": artist_id}]}).encode()),
-                BytesIO(b"[]"),
-            ]
-        ),
+    network = MagicMock(
+        side_effect=[
+            BytesIO(json.dumps({"artists": [{"id": artist_id}]}).encode()),
+            BytesIO(b"[]"),
+        ]
     )
+    monkeypatch.setattr(populate, "urlopen", network)
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
     with caplog.at_level(logging.WARNING):
         assert not populate.main_loop(source, tmp_path / "Music")
     assert "No ListenBrainz popularity data" in caplog.text
@@ -1959,6 +1968,7 @@ def test_artist_only_selects_highest_listen_count(
     network = MagicMock(
         side_effect=[BytesIO(json.dumps(item).encode()) for item in responses]
     )
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
     monkeypatch.setattr(populate, "urlopen", network)
     monkeypatch.setattr(populate.time, "sleep", MagicMock())
     assert populate.main_loop(source, tmp_path / "Music")

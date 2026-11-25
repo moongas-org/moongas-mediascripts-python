@@ -13,12 +13,11 @@ from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
 from typing import Protocol, cast
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 import mutagen
-from mediascan.types.album.album_path import AlbumPathBuilder, album_pattern
+from mediascan.types.album.album_path import AlbumPathBuilder
 from mediascan.types.genre.genres import Genre
 from mediascan.types.track.track_yaml_file_validator import (
     is_list,
@@ -30,9 +29,10 @@ from openai import APIError, APIStatusError, OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from yaml import YAMLError
 
-from mediascripts.acoustid.musicbrainz import MIN_SLEEP, USER_AGENT, is_recording_id
+from mediascripts.acoustid.musicbrainz import USER_AGENT, is_recording_id
 from mediascripts.common.cli.parse_boolean import parse_boolean
-from mediascripts.common.http import retry_after_seconds
+from mediascripts.common.files import album_directory, path_component
+from mediascripts.common.musicbrainz import MusicBrainz, lucene_phrase
 from mediascripts.common.openai.client import MODEL_NAME, get_client
 from mediascripts.lyrics.lyrics_common import MEDIA_EXTENSIONS
 from mediascripts.mediafile.auto_tag_media_file import load_media, read_track_values, text_values
@@ -49,11 +49,7 @@ from mediascripts.track.track_yaml.track_yaml_common import (
 )
 
 logger = logging.getLogger(__name__)
-API_URL = "https://musicbrainz.org/ws/2"
-MAX_ATTEMPTS = 4
-MAX_RETRY_DELAY = 120.0
 MAX_SELECTION_ATTEMPTS = 3
-RETRY_STATUSES = {429, 500, 502, 503, 504}
 YAML_STRING_INSTRUCTIONS = """Double-quote every string value, including artist,
 title, genre, identifiers, and error messages. Escape embedded double quotes,
 backslashes, and newlines using JSON-style escaping. Never leave strings with
@@ -261,72 +257,6 @@ def ask_model(client: OpenAI, system: str, prompt: str) -> dict[str, object]:
     return result
 
 
-class MusicBrainz:
-    """Pace all catalogue requests, including searches and release lookups."""
-
-    def __init__(self) -> None:
-        self.last_request: float | None = None
-
-    def get(self, endpoint: str, **params: str) -> dict[str, object]:
-        request = Request(
-            f"{API_URL}/{endpoint}?{urlencode({**params, 'fmt': 'json'})}",
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-        )
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            if self.last_request is not None:
-                delay = max(0.0, MIN_SLEEP - (time.monotonic() - self.last_request))
-                logger.debug("MusicBrainz rate-limit wait: %.2fs", delay)
-                time.sleep(delay)
-            logger.info("MusicBrainz lookup: %s (attempt %d/%d)", request.full_url, attempt, MAX_ATTEMPTS)
-            self.last_request = time.monotonic()
-            started = time.perf_counter()
-            retry_delay = min(MAX_RETRY_DELAY, 2.0 ** attempt)
-            try:
-                with urlopen(request, timeout=30) as response:
-                    logger.info("MusicBrainz response: HTTP %s", getattr(response, "status", "unknown"))
-                    result: object = json.load(response)
-            except HTTPError as error:
-                retryable = error.code in RETRY_STATUSES
-                retry_after = error.headers.get("Retry-After")
-                logger.warning(
-                    "MusicBrainz HTTP %d after %.2fs (attempt %d/%d): %s",
-                    error.code, time.perf_counter() - started, attempt, MAX_ATTEMPTS, request.full_url,
-                )
-                error.close()
-                if not retryable or attempt == MAX_ATTEMPTS:
-                    raise
-                if retry_after:
-                    retry_delay = retry_after_delay(retry_after, retry_delay)
-            except (URLError, TimeoutError, ConnectionError) as error:
-                logger.warning(
-                    "MusicBrainz connection failure after %.2fs (attempt %d/%d): %s",
-                    time.perf_counter() - started, attempt, MAX_ATTEMPTS, error,
-                )
-                if attempt == MAX_ATTEMPTS:
-                    raise
-            else:
-                logger.info("MusicBrainz lookup completed in %.2fs", time.perf_counter() - started)
-                logger.debug("MusicBrainz response content: %s", json.dumps(result, ensure_ascii=False))
-                if not is_mapping(result):
-                    raise ValueError("MusicBrainz response must be a mapping")
-                return result
-            logger.warning("Retrying MusicBrainz in %.2fs", retry_delay)
-            time.sleep(retry_delay)
-        raise RuntimeError("MusicBrainz retry loop exhausted unexpectedly")
-
-
-def retry_after_delay(value: str, fallback: float) -> float:
-    seconds = retry_after_seconds(value)
-    if seconds is not None:
-        return min(MAX_RETRY_DELAY, seconds)
-    logger.warning("Invalid MusicBrainz Retry-After header %r; using %.2fs backoff", value, fallback)
-    return fallback
-
-
-def lucene_phrase(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
 def fuzzy_terms(field: str, value: str) -> str:
     normalized = "".join(
         char for char in unicodedata.normalize("NFKD", value) if not unicodedata.combining(char)
@@ -523,80 +453,6 @@ def artist_credit(value: object) -> str:
             raise ValueError("Artist joinphrase must be a string")
         parts.append(name + joinphrase)
     return "".join(parts).strip()
-
-
-def path_component(value: str) -> str:
-    """Keep directory components compatible with mediascan's album-name grammar."""
-    cleaned = re.sub(r'[:?&#%{}\\.`$!<>*"+|=/\[\]\x00-\x1f\x7f]', "_", value).strip()
-    if not cleaned or not cleaned.strip("_ "):
-        raise ValueError(f"Name cannot form a safe path component: {value!r}")
-    if cleaned != value:
-        logger.debug("Sanitized path component: %r -> %r", value, cleaned)
-    return cleaned
-
-
-def directory_name_key(value: str) -> str:
-    """Compare collection names independently of case and filename escaping."""
-    value = unicodedata.normalize("NFKC", value).casefold()
-    value = value.replace("&", " and ").replace("’", "'").replace("´", "'")
-    return re.sub(r"[\W_]+", " ", value).strip()
-
-
-def existing_directory(parent: Path, name: str, year: int | None = None) -> Path | None:
-    if not parent.exists():
-        return None
-    expected = {directory_name_key(name), directory_name_key(path_component(name))}
-    expected.discard("")
-    if not expected:
-        raise ValueError(f"Name cannot be matched safely to an existing directory: {name!r}")
-    matches: list[Path] = []
-    for candidate in sorted(parent.iterdir()):
-        if not candidate.is_dir():
-            continue
-        title = candidate.name
-        if year is not None:
-            dated = re.fullmatch(r"(.*?)\s*\[(\d{4})(?:-(\d{4}))?\]", title)
-            if dated is not None:
-                if dated.group(3) is not None or int(dated.group(2)) != year:
-                    continue
-                title = dated.group(1)
-        if directory_name_key(title) in expected:
-            matches.append(candidate)
-    if len(matches) > 1:
-        raise ValueError(
-            f"Ambiguous existing directories for {name!r} under {parent}: "
-            + ", ".join(str(path) for path in matches)
-        )
-    if matches:
-        logger.info("Reusing existing directory for %r: %s", name, matches[0])
-        return matches[0]
-    return None
-
-
-def album_directory(
-    destination: Path, artist: str, album: str, year: int, roots: list[Path] | None = None,
-) -> Path:
-    artist_name = path_component(artist)
-    album_title = path_component(album)
-    album_name = f"{album_title} [{year}]"
-    if not album_pattern.fullmatch(album_name):
-        raise ValueError(f"Invalid mediascan album name: {album_name}")
-    artist_dirs = [
-        artist_dir for root in (roots if roots is not None else [destination])
-        if (artist_dir := existing_directory(root, artist)) is not None
-    ]
-    albums = [
-        album_dir for artist_dir in artist_dirs
-        if (album_dir := existing_directory(artist_dir, album, year)) is not None
-    ]
-    if len(albums) > 1:
-        raise ValueError(f"Ambiguous existing album directories for {album!r}: {', '.join(map(str, albums))}")
-    if albums:
-        return albums[0]
-    if len(artist_dirs) > 1:
-        raise ValueError(f"Ambiguous existing artist directories for {artist!r}: {', '.join(map(str, artist_dirs))}")
-    artist_dir = artist_dirs[0] if artist_dirs else destination / artist_name
-    return artist_dir / album_name
 
 
 def dump_yaml(document: Mapping[str, object]) -> str:

@@ -606,6 +606,8 @@ mediascan_db:
   list-mediafiles
   list-tracks
   list-trackstreaming
+move:
+  move-from-various-artists
 rename:
   rename-album-files
 stats:
@@ -631,6 +633,57 @@ for a track. References to files skipped because of a filename collision stay
 unchanged. YAML comments and quoting are preserved; dry runs do not modify files.
 Straight and curly double quotation marks in filenames become single quotes,
 which avoids invalid double-quote characters on NTFS.
+
+## Move Tracks Out of Various Artists
+
+`move-from-various-artists` attempts to move **one identifiable track per run**
+from a `Various Artists` directory into its own artist/album directory.
+Whitespace and case variants such as `Various  Artists` are recognized.
+By default it recursively scans `$MOONGAS_COLLECTION_ROOTDIR/data`; use `-d` /
+`--dir` to supply a collection data directory instead. Nested libraries such as
+`data/Music/Various Artists` are supported; destination artists are siblings of
+the source `Various Artists` directory, not placed at the top of `data`.
+
+```bash
+move-from-various-artists -n
+move-from-various-artists --dir /collection/data
+```
+
+Changes are made by default; `-n` / `--dry-run` performs the same online lookup
+and previews one move and YAML changes without writing anything. Local
+identification uses track YAML, embedded artist tags, then an `Artist - Title`
+filename (optionally track-number-prefixed). Title/year prefer track YAML over
+embedded tags; the source album YAML or directory supplies a missing year.
+The compilation album name is **never used as the destination album**.
+
+The script sends artist/title searches to MusicBrainz, checks exact normalized
+artist/title credits, and browses the matching recordings' official releases.
+It selects the earliest studio album release group, excluding compilations,
+live albums, remixes, singles and other secondary release types. Original
+release-group names and years replace the compilation album and year in track
+YAML. The source year is a hint: albums newer than that year are excluded, and
+an exact year can disambiguate distinct recordings. Multiple unresolved album
+groups, unlabelled alternative recordings and incomplete catalog results are
+handled conservatively; uncertain tracks remain in place. Explicitly
+disambiguated live/remix/demo recordings are skipped rather than assumed to be
+the studio version. Unknown/conflicting artists, malformed YAML, ambiguous
+directories and destination collisions are also reported and skipped.
+Requests are rate-limited with bounded retries; network failures stop the run
+without moving the track. No API key or LLM service is required.
+
+Existing artist/album directories are reused using the same case-insensitive,
+punctuation-normalizing rules as `track-yaml-auto-create`. New albums use
+`Album [YYYY]` names. All same-basename media, lyrics and other sidecars move
+together; YAML-only tracks are supported. Filenames are retained. The script
+preserves track metadata/comments, updates artist/albumartist/album/year and
+collection-relative media paths, and creates or fills missing destination album metadata while
+preserving existing album fields. Shared source album metadata/artwork and
+empty source directories are left untouched. Existing destination tracks are
+never overwritten. Originals are removed only after destination files and YAML
+have been written; filesystem errors trigger rollback. Embedded media tags are
+not rewritten (the media file's own metadata describes the original file);
+use `auto-tag-media-file` separately if desired. Missing genres are explicitly
+reported and written as `Unknown` rather than inferred from the compilation.
 
 ## Copy Media Library Diagnostics
 

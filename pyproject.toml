@@ -89,6 +89,7 @@ lyrics-lrc-auto-populate = "mediascripts.console:lyrics_lrc_auto_populate"
 list-missing-region-names = "mediascripts.console:list_missing_region_names"
 make-covers-video = "mediascripts.console:make_covers_video"
 rename-album-files = "mediascripts.console:rename_album_files"
+move-from-various-artists = "mediascripts.console:move_from_various_artists"
 
 [project.optional-dependencies]
 lyrics = [

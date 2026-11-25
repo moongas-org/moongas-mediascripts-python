@@ -52,3 +52,4 @@ lyrics_lrc_auto_populate = ConsoleScript("mediascripts.lyrics.lyrics_lrc.lyrics_
 list_missing_region_names = ConsoleScript("mediascripts.artist.artist_mapgraph.list_missing_region_names")
 make_covers_video = ConsoleScript("mediascripts.convert.make_covers_video")
 rename_album_files = ConsoleScript("mediascripts.rename.rename_album_files")
+move_from_various_artists = ConsoleScript("mediascripts.move.move_from_various_artists")
