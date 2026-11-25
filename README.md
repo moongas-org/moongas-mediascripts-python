@@ -636,7 +636,7 @@ which avoids invalid double-quote characters on NTFS.
 
 ## Move Tracks Out of Various Artists
 
-`move-from-various-artists` attempts to move **one identifiable track per run**
+`move-from-various-artists` attempts to move **one identifiable track per run by default**
 from a `Various Artists` directory into its own artist/album directory.
 Whitespace and case variants such as `Various  Artists` are recognized.
 By default it recursively scans `$MOONGAS_COLLECTION_ROOTDIR/data`; use `-d` /
@@ -647,10 +647,15 @@ the source `Various Artists` directory, not placed at the top of `data`.
 ```bash
 move-from-various-artists -n
 move-from-various-artists --dir /collection/data
+move-from-various-artists --count 10 --sleep 2
 ```
 
 Changes are made by default; `-n` / `--dry-run` performs the same online lookup
-and previews one move and YAML changes without writing anything. Local
+and previews moves and YAML changes without writing anything. `-c` / `--count`
+limits successful moves (or dry-run previews), defaulting to 1; skipped tracks
+do not consume the limit, and 0 processes nothing. `--sleep` sets the minimum
+seconds between MusicBrainz API requests, including retries (default and minimum:
+1.01). Local
 identification uses track YAML, embedded artist tags, then an `Artist - Title`
 filename (optionally track-number-prefixed). Title/year prefer track YAML over
 embedded tags; the source album YAML or directory supplies a missing year.

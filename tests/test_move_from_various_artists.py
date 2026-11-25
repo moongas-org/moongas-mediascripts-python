@@ -1,5 +1,6 @@
 import copy
 import sys
+from io import BytesIO
 from pathlib import Path
 from typing import Protocol, cast
 from unittest.mock import MagicMock
@@ -10,6 +11,7 @@ from mediascan.types.track.track_yaml_file_validator import is_mapping, validate
 from mutagen.id3 import ID3
 
 from mediascripts.move import move_from_various_artists as move
+from mediascripts.common import musicbrainz as catalogue_http
 
 RECORDING = "0c652621-96d6-46bb-a886-b277b87bafd4"
 GROUP = "30cd7bd2-ac63-4dd7-a745-864d298f34cf"
@@ -79,7 +81,7 @@ def catalogue(
         return copy.deepcopy(responses[endpoint])
 
     client.get.side_effect = get
-    monkeypatch.setattr(move, "MusicBrainz", lambda: client)
+    monkeypatch.setattr(move, "MusicBrainz", MagicMock(return_value=client))
     return client
 
 
@@ -518,3 +520,99 @@ def test_cli_default_and_dry_run(
     assert move.main() == 0
     assert source.exists() == dry_run
     assert target(source).exists() != dry_run
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("count", [0, 1, 2, 5, None])
+def test_count_limits_successful_tracks(
+    source: Path, catalogue: MagicMock, dry_run: bool, count: int | None,
+) -> None:
+    original = source.read_bytes()
+    siblings = [source.with_name(f"0{index} - Track.yml") for index in (2, 3)]
+    for sibling in siblings:
+        sibling.write_bytes(original)
+    unknown = source.with_name("00 - Unknown.yml")
+    unknown.write_text("trackData: {artist: Various Artists, title: Unknown}\n")
+    expected = min(count, 3) if count is not None else 3
+
+    assert move.move_from_various_artists(data_root(source), count=count, dry_run=dry_run) == (expected > 0)
+
+    assert catalogue.get.call_count == expected * 3
+    assert unknown.exists()
+    tracks = [source, *siblings]
+    if dry_run:
+        assert all(path.read_bytes() == original for path in tracks)
+        assert not target(source).parent.exists()
+    else:
+        assert sum(not path.exists() for path in tracks) == expected
+        assert sum((target(source).parent / path.name).exists() for path in tracks) == expected
+
+
+@pytest.mark.parametrize("flag", ["-c", "--count"])
+def test_cli_forwards_count_and_sleep(
+    source: Path, monkeypatch: pytest.MonkeyPatch, flag: str,
+) -> None:
+    runner = MagicMock(return_value=True)
+    monkeypatch.setattr(move, "move_from_various_artists", runner)
+    monkeypatch.setattr(sys, "argv", [
+        "move-from-various-artists", "--dir", str(data_root(source)),
+        flag, "3", "--sleep", "2.5", "-n",
+    ])
+    assert move.main() == 0
+    runner.assert_called_once_with(data_root(source), count=3, sleep=2.5, dry_run=True)
+
+
+@pytest.mark.parametrize("arguments", [
+    ["--count", "-1"], ["--sleep", "0"], ["--sleep", "-1"],
+    ["--sleep", "nan"], ["--sleep", "inf"], ["--sleep", "not-a-number"],
+])
+def test_cli_rejects_invalid_limits(monkeypatch: pytest.MonkeyPatch, arguments: list[str]) -> None:
+    monkeypatch.setattr(sys, "argv", ["move-from-various-artists", *arguments])
+    with pytest.raises(SystemExit) as error:
+        move.main()
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("sleep", [0, -1, float("nan"), float("inf")])
+def test_api_rejects_invalid_sleep(source: Path, sleep: float) -> None:
+    with pytest.raises(ValueError, match="sleep must"):
+        move.move_from_various_artists(data_root(source), sleep=sleep)
+    with pytest.raises(ValueError, match="sleep must"):
+        catalogue_http.MusicBrainz(sleep=sleep)
+
+
+def test_api_rejects_negative_count(source: Path) -> None:
+    with pytest.raises(ValueError, match="count must"):
+        move.move_from_various_artists(data_root(source), count=-1)
+
+
+def test_zero_count_does_not_scan_or_request(tmp_path: Path, catalogue: MagicMock) -> None:
+    assert not move.move_from_various_artists(tmp_path / "not-present", count=0)
+    catalogue.get.assert_not_called()
+
+
+def test_sleep_is_forwarded_to_catalogue(source: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    factory = MagicMock()
+    factory.return_value.get.return_value = {"count": 0, "recordings": []}
+    monkeypatch.setattr(move, "MusicBrainz", factory)
+    assert not move.move_from_various_artists(data_root(source), sleep=3.5)
+    factory.assert_called_once_with(sleep=3.5)
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_catalogue_honors_sleep_interval(monkeypatch: pytest.MonkeyPatch, retry: bool) -> None:
+    responses: list[object] = (
+        [TimeoutError("temporary"), BytesIO(b"{}")] if retry
+        else [BytesIO(b"{}"), BytesIO(b"{}")]
+    )
+    network = MagicMock(side_effect=responses)
+    sleeper = MagicMock()
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    monkeypatch.setattr(catalogue_http.time, "sleep", sleeper)
+    monkeypatch.setattr(catalogue_http.time, "monotonic", MagicMock(side_effect=[10.0, 10.25, 13.5]))
+    client = catalogue_http.MusicBrainz(sleep=3.5)
+    assert client.get("recording", query="test") == {}
+    if not retry:
+        assert client.get("release", query="test") == {}
+    sleeper.assert_any_call(3.25)
+    assert network.call_count == 2

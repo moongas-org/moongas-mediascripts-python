@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -22,7 +23,10 @@ RETRY_STATUSES = {429, 500, 502, 503, 504}
 class MusicBrainz:
     """Pace all catalogue requests, including searches and release lookups."""
 
-    def __init__(self) -> None:
+    def __init__(self, sleep: float = MIN_SLEEP) -> None:
+        if not math.isfinite(sleep) or sleep < MIN_SLEEP:
+            raise ValueError(f"sleep must be a finite number of seconds >= {MIN_SLEEP:g}")
+        self.sleep = sleep
         self.last_request: float | None = None
 
     def get(self, endpoint: str, **params: str) -> dict[str, object]:
@@ -32,7 +36,7 @@ class MusicBrainz:
         )
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if self.last_request is not None:
-                delay = max(0.0, MIN_SLEEP - (time.monotonic() - self.last_request))
+                delay = max(0.0, self.sleep - (time.monotonic() - self.last_request))
                 logger.debug("MusicBrainz rate-limit wait: %.2fs", delay)
                 time.sleep(delay)
             logger.info("MusicBrainz lookup: %s (attempt %d/%d)", request.full_url, attempt, MAX_ATTEMPTS)

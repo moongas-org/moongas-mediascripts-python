@@ -1,7 +1,8 @@
-"""Move one track out of Various Artists using local metadata and MusicBrainz."""
+"""Move tracks out of Various Artists using local metadata and MusicBrainz."""
 
 import argparse
 import logging
+import math
 import os
 import re
 import shutil
@@ -16,7 +17,7 @@ import mutagen
 from mediascan.types.track.track_yaml_file_validator import is_list, is_mapping
 from ruamel.yaml.error import YAMLError
 
-from mediascripts.acoustid.musicbrainz import is_recording_id
+from mediascripts.acoustid.musicbrainz import MIN_SLEEP, is_recording_id, sleep_seconds
 from mediascripts.common.files import album_directory, directory_name_key
 from mediascripts.common.musicbrainz import MusicBrainz, lucene_phrase
 from mediascripts.lyrics.lyrics_common import MEDIA_EXTENSIONS
@@ -406,8 +407,17 @@ def move_track(
     return target_yaml
 
 
-def move_from_various_artists(data_root: Path, *, dry_run: bool = False) -> bool:
-    """Skip uncertain/colliding tracks and stop after the first successful move."""
+def move_from_various_artists(
+    data_root: Path, *, dry_run: bool = False, count: int | None = 1, sleep: float = MIN_SLEEP,
+) -> bool:
+    """Skip uncertain/colliding tracks and limit successful moves or previews."""
+    if count is not None and count < 0:
+        raise ValueError("count must be non-negative")
+    if not math.isfinite(sleep) or sleep < MIN_SLEEP:
+        raise ValueError(f"sleep must be a finite number of seconds >= {MIN_SLEEP:g}")
+    if count == 0:
+        logger.info("Track limit is zero; nothing to process")
+        return False
     data_root = data_root.absolute()
     if not data_root.is_dir():
         raise NotADirectoryError(data_root)
@@ -428,7 +438,8 @@ def move_from_various_artists(data_root: Path, *, dry_run: bool = False) -> bool
     if not sources:
         raise FileNotFoundError(f"No Various Artists directory under {data_root}")
     seen: set[tuple[Path, str]] = set()
-    catalogue = MusicBrainz()
+    catalogue = MusicBrainz(sleep=sleep)
+    processed = 0
     for source in sources:
         for path in iter_collection_files(source, album_directories_only=False):
             if path.suffix.lower() not in (*MEDIA_EXTENSIONS, *YAML_SUFFIXES):
@@ -444,17 +455,31 @@ def move_from_various_artists(data_root: Path, *, dry_run: bool = False) -> bool
             except (ValueError, YAMLError, UnicodeError, FileExistsError) as error:
                 logger.warning("[%s] Skipping track: %s", path, error)
                 continue
-            logger.info("%s one track; stopping", "Previewed" if dry_run else "Moved")
-            return True
-    logger.info("No safely identifiable, non-colliding track found")
-    return False
+            processed += 1
+            logger.info("%s %d track(s)", "Previewed" if dry_run else "Moved", processed)
+            if count is not None and processed >= count:
+                logger.info("Track limit reached; stopping")
+                return True
+    if processed == 0:
+        logger.info("No safely identifiable, non-colliding track found")
+    return processed > 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-d", "--dir", type=Path, help="Collection data directory to search recursively.")
-    parser.add_argument("-n", "--dry-run", action="store_true", help="Preview one move without changing any files.")
+    parser.add_argument("-n", "--dry-run", action="store_true", help="Preview moves without changing any files.")
+    parser.add_argument(
+        "-c", "--count", type=int, default=1,
+        help="Maximum successful moves or previews (non-negative; default: 1).",
+    )
+    parser.add_argument(
+        "--sleep", type=sleep_seconds, default=MIN_SLEEP,
+        help=f"Minimum seconds between API requests (default and minimum: {MIN_SLEEP:g}).",
+    )
     args = parser.parse_args()
+    if args.count < 0:
+        parser.error("--count must be non-negative")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     directory = args.dir
     if directory is None:
@@ -463,7 +488,7 @@ def main() -> int:
             parser.error("Set MOONGAS_COLLECTION_ROOTDIR or supply --dir")
         directory = Path(root) / "data"
     try:
-        move_from_various_artists(directory, dry_run=args.dry_run)
+        move_from_various_artists(directory, dry_run=args.dry_run, count=args.count, sleep=args.sleep)
     except (OSError, ValueError, YAMLError, UnicodeError) as error:
         logger.error("Could not move track: %s", error)
         return 1
