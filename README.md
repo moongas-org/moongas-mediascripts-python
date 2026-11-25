@@ -1109,18 +1109,29 @@ necessarily best-effort. Malformed or conflicting metadata is reported, not
 silently guessed.
 Each identified album is searched using quoted artist/title phrases only,
 without fuzzy terms or a date clause. The inferred year is used to filter returned
-candidates and validate the selected release locally, rather than restricting
-the search by a specific release-event date. If this search returns no usable
+candidates, rather than restricting the search by a specific release-event
+date. A missing or later release date does not rule out an album: the locally
+inferred album year is used for generated track metadata even when an older or
+later pressing supplies the tracklist. The local album title and album artist
+are also preserved; individual track artists come from the selected release.
+If this search returns no usable
 candidates or the model finds no convincing match, directory mode tries one
 broader search using individual key title words, omitting generic words such
 as `live`, `in`, and `the`. For example, `Live in Glasgow` falls back to
 `artist:"Paul McCartney" AND release:"glasgow"`. This fallback retains the artist
 filter, uses no fuzzy operators or date clause, and is skipped when there are
-no useful terms or the query would be unchanged. The model must still identify
-the same album and live/studio version; differing catalogue title wording is
-allowed only on this fallback, with key title words, artist and year validated
-against the fetched release. A second rejection ends the attempt. HTTP and
-malformed-response errors do not trigger search broadening.
+no useful terms or the query would be unchanged. If the model rejects results,
+the best locally matching catalogue candidate is still selected, including
+bootlegs. Candidates must match the artist (including as one artist in a joint
+credit) and either the title or its key
+words. They are ranked by exact title, album primary type, official status,
+earliest known release year, and MusicBrainz search relevance, in that order.
+Search relevance is not popularity; the search response has no popularity
+metric. Missing metadata is ranked after known values. The chosen release's
+artist and title are checked again after lookup; its date and the locally
+inferred year are logged. Genre still comes from the model or neighboring
+tracks; if neither provides a valid genre, the album fails without writing.
+HTTP and malformed-response errors do not trigger search broadening.
 New files stay in the existing album directory
 even when its spelling differs from the catalogue. Existing track YAML is
 preserved, including tracks with nonstandard filenames matched by title.

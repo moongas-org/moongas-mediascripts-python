@@ -420,7 +420,116 @@ def install_directory_lookup(
     return client, network
 
 
-@pytest.mark.parametrize("failure", ["rejection", "empty", "wrong-year"])
+def test_undated_glasgow_bootleg_selected_after_model_rejection(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    album = tmp_path / "Paul McCartney/Live in Glasgow [1979]"
+    album.mkdir(parents=True)
+    bootleg_id = "68054d69-5c8c-455f-b38e-1c537638c918"
+    credit: list[dict[str, object]] = [{"name": "Paul McCartney"}]
+    candidates: list[dict[str, object]] = [
+        {"id": bootleg_id, "title": "Live in Glasgow", "status": "Bootleg", "score": 100,
+         "artist-credit": credit, "release-group": {"primary-type": "Album", "secondary-types": ["Live"]}},
+        {"id": "a50b91c7-f9d5-4da6-88ec-677b986126e9",
+         "title": "Last Flight:The Complete 1979 Glasgow Concert", "status": "Bootleg",
+         "score": 71, "date": "1998", "artist-credit": [{"name": "Paul McCartney & Wings"}]},
+    ]
+    full: dict[str, object] = {**release, "id": bootleg_id, "title": "Live in Glasgow", "artist-credit": credit}
+    del full["date"]
+    client = model_client(
+        "error: No convincing match exists.\n", "error: No convincing match exists.\n",
+        "genre: Classic Rock\n",
+    )
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, client))
+    network = MagicMock(side_effect=[
+        BytesIO(json.dumps({"releases": candidates}).encode()),
+        BytesIO(json.dumps({"releases": candidates}).encode()),
+        BytesIO(json.dumps(full).encode()),
+    ])
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    monkeypatch.setattr(populate.time, "sleep", MagicMock())
+
+    assert populate.directory_loop(album)
+    assert _track_data((album / "01 - First.yml").read_text())["year"] == 1979
+    assert bootleg_id in network.call_args_list[-1].args[0].full_url
+    assert "Model rejected album matches; selecting best matching" in caplog.text
+    assert "score is not popularity" in caplog.text
+
+
+def test_album_selection_ranks_exact_official_and_oldest_without_guessing_popularity() -> None:
+    def candidate(release_id: str, title: str, status: str, date: str, score: int) -> dict[str, object]:
+        return {"id": release_id, "title": title, "status": status, "date": date, "score": score}
+
+    choices = [
+        candidate(RECORDING_ID, "Live in Glasgow", "Bootleg", "1970", 100),
+        candidate(OTHER_ID, "Live in Glasgow", "Official", "1980", 100),
+        candidate(RELEASE_ID, "Live in Glasgow", "Official", "1979", 80),
+        candidate("44444444-4444-4444-8444-444444444444", "Glasgow Festival", "Official", "1960", 100),
+        candidate("55555555-5555-4555-8555-555555555555", "Live in London", "Official", "1960", 100),
+    ]
+    ranked = populate.rank_album_candidates(choices, "Artist", "Live in Glasgow")
+    assert [item["id"] for item in ranked] == [
+        RELEASE_ID, OTHER_ID, RECORDING_ID, "44444444-4444-4444-8444-444444444444",
+    ]
+
+
+def test_directory_uses_later_concert_release_for_original_album(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    album = tmp_path / "Paul McCartney/Live in Glasgow [1979]"
+    album.mkdir(parents=True)
+    title = "Last Flight: The Complete 1979 Glasgow Concert"
+    credit: list[dict[str, object]] = [{"name": "Paul McCartney & Wings"}]
+    later: dict[str, object] = {
+        **release, "title": title, "date": "1998", "status": "Bootleg", "artist-credit": credit,
+    }
+    client = model_client("option: 1\ngenre: Classic Rock\n")
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, client))
+    network = MagicMock(side_effect=[
+        BytesIO(b'{"releases": []}'),
+        BytesIO(json.dumps({"releases": [later]}).encode()),
+        BytesIO(json.dumps(later).encode()),
+    ])
+    monkeypatch.setattr(catalogue_http, "urlopen", network)
+    monkeypatch.setattr(populate.time, "sleep", MagicMock())
+
+    assert populate.directory_loop(album)
+    track = _track_data((album / "01 - First.yml").read_text())
+    assert track["year"] == 1979
+    assert track["album"] == "Live in Glasgow"
+    assert track["albumartist"] == "Paul McCartney"
+    assert not (album.parent / "Last Flight_ The Complete 1979 Glasgow Concert [1998]").exists()
+
+
+@pytest.mark.parametrize(("credit", "expected"), [
+    ("Paul McCartney & Wings", True),
+    ("Paul McCartney and Wings", True),
+    ("Paul McCartney", True),
+    ("Other Paul McCartney", False),
+    ("McCartney", False),
+])
+def test_album_artist_joint_credit_matching(credit: str, expected: bool) -> None:
+    assert populate.matching_album_artist([{"name": credit}], "Paul McCartney") is expected
+
+
+@pytest.mark.parametrize("release_date", [None, "2000-01-01"])
+def test_directory_uses_local_album_year_for_missing_or_later_release_date(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    release_date: str | None,
+) -> None:
+    album = tmp_path / "Artist/Album [1995]"
+    album.mkdir(parents=True)
+    if release_date is None:
+        del release["date"]
+    else:
+        release["date"] = release_date
+    install_directory_lookup(monkeypatch, release)
+    assert populate.directory_loop(album)
+    assert _track_data((album / "01 - First.yml").read_text())["year"] == 1995
+
+
+@pytest.mark.parametrize("failure", ["rejection", "empty"])
 def test_directory_broadens_album_search_after_no_match(
     tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture, failure: str,
@@ -433,7 +542,7 @@ def test_directory_broadens_album_search_after_no_match(
     }
     candidate: dict[str, object] = {"id": RELEASE_ID, "title": "Glasgow 1979", "date": "1979"}
     initial = {"releases": [] if failure == "empty" else [
-        {**candidate, "date": "2000" if failure == "wrong-year" else "1979"},
+        candidate,
     ]}
     client = model_client(*(
         ["error: No convincing match exists.\n"] if failure == "rejection" else []
@@ -479,7 +588,7 @@ def test_directory_album_broadening_is_bounded(
     assert network.call_count == (2 if title == "Live in Glasgow" else 1)
 
 
-@pytest.mark.parametrize("problem", ["artist-credit", "date", "title"])
+@pytest.mark.parametrize("problem", ["artist-credit", "title"])
 def test_broadened_album_still_validates_release(
     release: dict[str, object], monkeypatch: pytest.MonkeyPatch, problem: str,
 ) -> None:
@@ -521,7 +630,7 @@ def test_album_key_tokens_do_not_add_fuzzy_terms_or_lucene_operators() -> None:
     assert populate.album_title_terms('Live in Glasgow: "II" +evil* -other') == ["glasgow", "ii", "evil", "other"]
 
 
-@pytest.mark.parametrize("mismatch", ["artist-credit", "title", "date"])
+@pytest.mark.parametrize("mismatch", ["artist-credit", "title"])
 def test_scoped_cli_rejects_wrong_album(
     tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture, mismatch: str,

@@ -463,14 +463,18 @@ def dump_yaml(document: Mapping[str, object]) -> str:
 
 def prepare_tracks(
     release: Mapping[str, object], recording_id: str | None, destination: Path,
-    roots: list[Path] | None = None, *, album_dir: Path | None = None,
+    roots: list[Path] | None = None, *, album_dir: Path | None = None, album_year: int | None = None,
+    album_title: str | None = None, album_artist: str | None = None,
 ) -> list[tuple[Path, dict[str, object]]]:
-    album = text_field(release, "title")
-    date = text_field(release, "date")
-    if not re.fullmatch(r"[1-9]\d{3}(?:-\d{2}(?:-\d{2})?)?", date):
-        raise ValueError("Release date must start with a four-digit year")
-    year = int(date[:4])
-    albumartist = artist_credit(release.get("artist-credit"))
+    album = album_title if album_title is not None else text_field(release, "title")
+    if album_year is None:
+        date = text_field(release, "date")
+        if not re.fullmatch(r"[1-9]\d{3}(?:-\d{2}(?:-\d{2})?)?", date):
+            raise ValueError("Release date must start with a four-digit year")
+        year = int(date[:4])
+    else:
+        year = album_year
+    albumartist = album_artist if album_artist is not None else artist_credit(release.get("artist-credit"))
     if album_dir is None:
         album_dir = album_directory(destination, albumartist, album, year, roots)
     media = mapping_list(release.get("media"), "release media")
@@ -679,42 +683,128 @@ def album_title_terms(title: str) -> list[str]:
     return list(dict.fromkeys(word.casefold() for word in words if word.casefold() not in generic))
 
 
+def matching_album_artist(credits: object, artist: str) -> bool:
+    credit = artist_credit(credits)
+    expected = directory_name_key(artist)
+    if directory_name_key(credit) == expected:
+        return True
+    names = re.split(r"\s*(?:&|,|;|\bfeat\.?\b|\bfeaturing\b|\bwith\b|\band\b)\s*", credit, flags=re.IGNORECASE)
+    return any(directory_name_key(name) == expected for name in names)
+
+
+def rank_album_candidates(
+    candidates: list[dict[str, object]], artist: str, title: str,
+) -> list[dict[str, object]]:
+    terms = set(album_title_terms(title))
+    expected_title = directory_name_key(title)
+    eligible: list[dict[str, object]] = []
+    for candidate in candidates:
+        candidate_title = text_field(candidate, "title")
+        exact = directory_name_key(candidate_title) == expected_title
+        if not exact and (not terms or not terms.issubset(set(album_title_terms(candidate_title)))):
+            logger.info("Rejecting unrelated release title %r", candidate_title)
+            continue
+        credits = candidate.get("artist-credit")
+        if credits is not None and not matching_album_artist(credits, artist):
+            logger.info("Rejecting release with different artist credit: %r", credits)
+            continue
+        release_id = text_field(candidate, "id")
+        if not is_recording_id(release_id):
+            raise ValueError("MusicBrainz release ID has an invalid shape")
+        eligible.append(candidate)
+
+    def key(candidate: dict[str, object]) -> tuple[int, int, int, int, int, str]:
+        exact = directory_name_key(text_field(candidate, "title")) == expected_title
+        group = candidate.get("release-group")
+        primary = group.get("primary-type") if is_mapping(group) else None
+        primary_rank = 0 if primary == "Album" else 1 if not primary else 2
+        status = str(candidate.get("status", "")).casefold()
+        status_rank = {"official": 0, "promotion": 1, "bootleg": 2, "pseudo-release": 3}.get(status, 4)
+        date = candidate.get("date")
+        year = int(date[:4]) if isinstance(date, str) and re.match(r"^[1-9]\d{3}", date) else 9999
+        score = candidate.get("score")
+        search_score = score if type(score) is int else 0
+        return (0 if exact else 1, primary_rank, status_rank, year, -search_score, text_field(candidate, "id"))
+
+    return sorted(eligible, key=key)
+
+
 def resolve_album(
     artist: str, title: str, year: int, client: OpenAI, catalogue: MusicBrainz,
 ) -> tuple[dict[str, object], str]:
     terms = album_title_terms(title)
     broadened = False
+    available: list[dict[str, object]] = []
+    last_error: NoCatalogueMatch | None = None
+    release_id: str | None = None
+    genre = ""
     for title_terms in (None, terms):
         try:
             candidates = search_candidates(catalogue, "release", artist, title, title_terms=title_terms)
-            # Missing search dates may be filled by the lookup; known wrong years are never selected.
-            candidates = [item for item in candidates if not item.get("date") or str(item["date"])[:4] == str(year)]
+            candidates = rank_album_candidates(candidates, artist, title)
+            available.extend(candidates)
             if not candidates:
-                raise NoCatalogueMatch(f"No release candidates match the expected year {year}")
+                raise NoCatalogueMatch("No releases match the album title and artist")
             options, identifiers = selection_options(candidates, "album")
-            _, release_id, genre = select_catalogue_option(
+            _, model_release_id, genre = select_catalogue_option(
                 client,
                 f"Create missing tracks for this album, not an artist's most popular song:\n"
                 f"{json.dumps({'artist': artist, 'album': title, 'year': year}, ensure_ascii=False)}\n"
                 "The local album title may differ from the catalogue wording. "
                 "Accept a title variant only if it convincingly identifies the same album, "
-                "artist, year and live/studio version; reject unrelated concerts or editions.\n"
+                "artist and live/studio version; the local year may be the concert or album year "
+                "rather than the date of this particular release. Bootlegs are acceptable. "
+                "Reject unrelated concerts or albums.\n"
                 f"Numbered options:\n{json.dumps(options, ensure_ascii=False)}",
                 identifiers, "album",
             )
+            release_id = text_field(candidates[0], "id")
+            logger.info(
+                "Highest-ranked matching release: title=%r id=%s status=%r date=%r search_score=%r",
+                candidates[0].get("title"), release_id, candidates[0].get("status"),
+                candidates[0].get("date"), candidates[0].get("score"),
+            )
+            if model_release_id != release_id:
+                logger.info("Using highest-ranked release %s instead of model choice %s", release_id, model_release_id)
         except NoCatalogueMatch as error:
+            last_error = error
             if title_terms is not None or not terms or terms == [title.casefold()]:
-                raise
+                break
             logger.warning(
                 "Full-title album lookup failed: %s; broadening to key title tokens %r "
-                "while retaining artist %r and local year validation (%d)",
+                "while retaining artist %r and local album year %d",
                 error, terms, artist, year,
             )
         else:
-            broadened = title_terms is not None
+            broadened = directory_name_key(text_field(candidates[0], "title")) != directory_name_key(title)
             break
     else:
-        raise NoCatalogueMatch(f"No convincing album match for {artist} - {title} [{year}]")
+        raise RuntimeError("Album search exhausted unexpectedly")
+    if release_id is None:
+        ranked = rank_album_candidates(available, artist, title)
+        if not ranked:
+            raise last_error or NoCatalogueMatch(f"No album match for {artist} - {title} [{year}]")
+        candidate = ranked[0]
+        release_id = text_field(candidate, "id")
+        broadened = directory_name_key(text_field(candidate, "title")) != directory_name_key(title)
+        logger.warning(
+            "Model rejected album matches; selecting best matching catalogue result: "
+            "title=%r id=%s status=%r date=%r search_score=%r (score is not popularity)",
+            candidate.get("title"), release_id, candidate.get("status"), candidate.get("date"), candidate.get("score"),
+        )
+        try:
+            genre_data = ask_model(
+                client, SELECTION_PROMPT,
+                f"Identify a genre for artist {artist!r} and album {title!r}. "
+                "Return only genre: <valid genre>, or error if unknown.",
+            )
+            value = genre_data.get("genre", "")
+            if not isinstance(value, str):
+                raise ValueError("Model genre must be a string")
+            genre = value.strip()
+        except NoCatalogueMatch as error:
+            logger.warning("Could not infer genre from model; trying neighboring tracks: %s", error)
+            genre = ""
     release = catalogue.get(f"release/{release_id}", inc="recordings+artist-credits")
     release_title = text_field(release, "title")
     title_matches = (
@@ -723,9 +813,12 @@ def resolve_album(
     )
     if (release.get("id") != release_id
             or not title_matches
-            or directory_name_key(artist_credit(release.get("artist-credit"))) != directory_name_key(artist)
-            or text_field(release, "date")[:4] != str(year)):
+            or not matching_album_artist(release.get("artist-credit"), artist)):
         raise ValueError(f"Selected release does not match scoped album {artist} - {title} [{year}]")
+    logger.info(
+        "Selected album %r (%s): release date=%r; using local album year %d for track metadata",
+        release_title, release_id, release.get("date"), year,
+    )
     return release, genre
 
 
@@ -815,7 +908,10 @@ def directory_loop(
             if client is None:
                 client = get_client()
             release, genre = resolve_album(artist, title, year, client, catalogue)
-            prepared = prepare_tracks(release, None, album.parent.parent, album_dir=album)
+            prepared = prepare_tracks(
+                release, None, album.parent.parent, album_dir=album,
+                album_year=year, album_title=title, album_artist=artist,
+            )
             missing = missing_album_tracks(prepared, album)
             logger.info("[%s] %d catalogue tracks; %d missing YAML files", album, len(prepared), len(missing))
             tracks = format_tracks(missing, genre)
