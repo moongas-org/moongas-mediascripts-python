@@ -1,4 +1,4 @@
-"""Create track YAML from a UTF-8 list of track or album requests."""
+"""Create missing track YAML from requests or locally identified album directories."""
 
 import argparse
 import json
@@ -31,11 +31,11 @@ from yaml import YAMLError
 
 from mediascripts.acoustid.musicbrainz import USER_AGENT, is_recording_id
 from mediascripts.common.cli.parse_boolean import parse_boolean
-from mediascripts.common.files import album_directory, path_component
+from mediascripts.common.files import album_directory, directory_name_key, path_component
 from mediascripts.common.musicbrainz import MusicBrainz, lucene_phrase
 from mediascripts.common.openai.client import MODEL_NAME, get_client
 from mediascripts.lyrics.lyrics_common import MEDIA_EXTENSIONS
-from mediascripts.mediafile.auto_tag_media_file import load_media, read_track_values, text_values
+from mediascripts.mediafile.auto_tag_media_file import load_media, read_track_values, text_values, unescape_name
 from mediascripts.track.track_yaml.infer_genre import filter_valid_genres, infer_artist_genre
 from mediascripts.track.track_yaml.track_yaml_auto_populate import (
     YAML_ERRORS,
@@ -268,7 +268,7 @@ def fuzzy_terms(field: str, value: str) -> str:
 
 
 def search_candidates(
-    catalogue: MusicBrainz, entity: str, artist: str, title: str,
+    catalogue: MusicBrainz, entity: str, artist: str, title: str, *, year: int | None = None,
 ) -> list[dict[str, object]]:
     queries = [
         ("exact artist/title", f"artist:{lucene_phrase(artist)} AND {entity}:{lucene_phrase(title)}"),
@@ -276,6 +276,8 @@ def search_candidates(
         ("fuzzy title without artist filter", fuzzy_terms(entity, title)),
     ]
     for stage, query in queries:
+        if year is not None:
+            query += f" AND date:{year}*"
         logger.info("MusicBrainz search strategy: %s", stage)
         result = catalogue.get(entity, query=query, limit="10")
         candidates = mapping_list(result.get(f"{entity}s"), f"MusicBrainz {entity}s")
@@ -465,7 +467,7 @@ def dump_yaml(document: Mapping[str, object]) -> str:
 
 def prepare_tracks(
     release: Mapping[str, object], recording_id: str | None, destination: Path,
-    roots: list[Path] | None = None,
+    roots: list[Path] | None = None, *, album_dir: Path | None = None,
 ) -> list[tuple[Path, dict[str, object]]]:
     album = text_field(release, "title")
     date = text_field(release, "date")
@@ -473,7 +475,8 @@ def prepare_tracks(
         raise ValueError("Release date must start with a four-digit year")
     year = int(date[:4])
     albumartist = artist_credit(release.get("artist-credit"))
-    album_dir = album_directory(destination, albumartist, album, year, roots)
+    if album_dir is None:
+        album_dir = album_directory(destination, albumartist, album, year, roots)
     media = mapping_list(release.get("media"), "release media")
     logger.info(
         "Building track YAML: albumartist=%r, album=%r, year=%d, discs=%d, directory=%s",
@@ -564,26 +567,231 @@ def collection_roots(destination: Path) -> list[Path]:
     return roots
 
 
-def scoped_destination(directory: Path, roots: list[Path]) -> tuple[Path, Path]:
+RESERVED_YAML_STEMS = {"album", "artist", "artists", "files"}
+
+
+def directory_yaml_files(directory: Path) -> list[Path]:
+    return sorted(
+        path for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in {".yml", ".yaml"}
+    )
+
+
+def local_metadata(directory: Path, stem: str, key: str) -> dict[str, object]:
+    candidates = [path for path in directory_yaml_files(directory) if path.stem.casefold() == stem]
+    if len(candidates) > 1:
+        raise ValueError(f"Multiple {stem} YAML files in {directory}")
+    if not candidates:
+        return {}
+    content = candidates[0].read_text(encoding="utf-8-sig")
+    if not content.strip():
+        return {}
+    document = load_document(content)
+    data = document.get(key, document.get(re.sub(r"(?<!^)([A-Z])", r"_\1", key).lower(), {}))
+    if not is_mapping(data):
+        raise ValueError(f"Expected {key} mapping in {candidates[0]}")
+    logger.info("Using local %s metadata: %s", stem, candidates[0])
+    return data
+
+
+def scoped_album_directories(directory: Path) -> list[Path]:
     if not directory.is_dir():
-        raise ValueError(f"Selected artist or album directory does not exist: {directory}")
-    target = directory.resolve()
-    matches: list[tuple[Path, Path]] = []
-    for root in roots:
-        resolved_root = root.resolve()
-        if not target.is_relative_to(resolved_root):
+        raise ValueError(f"Selected directory does not exist: {directory}")
+    albums: list[Path] = []
+    visited: set[Path] = set()
+    scope = directory.resolve()
+    for root, children, filenames in os.walk(directory, followlinks=True, onerror=report_walk_error):
+        album = Path(root)
+        resolved = album.resolve()
+        if not resolved.is_relative_to(scope):
+            raise ValueError(f"Album directory {album} is outside selected directory {directory}")
+        if resolved in visited:
+            children.clear()
             continue
-        parts = target.relative_to(resolved_root).parts
-        if len(parts) == 1 or (
-            len(parts) == 2 and re.fullmatch(r".+\s*\[\d{4}\]", parts[1])
-        ):
-            matches.append((root, target))
-    if len(matches) != 1:
-        raise ValueError(
-            f"Selected directory must be an artist or year-tagged album directory "
-            f"under exactly one configured mediaDirs entry: {directory}"
+        visited.add(resolved)
+        is_album = bool(re.fullmatch(r".+\s*\[\d{4}\]", album.name)) or any(
+            Path(name).stem.casefold() == "album" and Path(name).suffix.lower() in {".yml", ".yaml"}
+            for name in filenames
         )
-    return matches[0]
+        if not is_album:
+            for path in directory_yaml_files(album):
+                if path.stem.casefold() in RESERVED_YAML_STEMS:
+                    continue
+                content = path.read_text(encoding="utf-8-sig")
+                if not content.strip():
+                    continue
+                document = load_document(content)
+                data = document.get("trackData", document.get("track_data"))
+                if is_mapping(data) and data.get("album"):
+                    is_album = True
+                    break
+        if is_album:
+            albums.append(album)
+            children.clear()
+        else:
+            children.sort()
+    if not albums:
+        raise ValueError(f"Selected directory contains no album directories: {directory}")
+    return albums
+
+
+def infer_album_identity(album: Path, *, artist_scope: bool = False) -> tuple[str, str, int]:
+    artist_data = local_metadata(album.parent, "artist", "artistData")
+    album_data = local_metadata(album, "album", "albumData")
+    track_data: list[dict[str, object]] = []
+    for path in directory_yaml_files(album):
+        if path.stem.casefold() in RESERVED_YAML_STEMS:
+            continue
+        content = path.read_text(encoding="utf-8-sig")
+        if not content.strip():
+            continue
+        document = load_document(content)
+        data = document.get("trackData", document.get("track_data"))
+        if not is_mapping(data):
+            raise ValueError(f"Expected trackData mapping in {path}")
+        track_data.append(data)
+
+    def consensus(field: str) -> object:
+        values = {str(data[field]).strip() for data in track_data if data.get(field) not in (None, "", 0)}
+        if len(values) > 1:
+            raise ValueError(f"Conflicting track {field} values in {album}: {sorted(values)}")
+        return next(iter(values), None)
+
+    names = artist_data.get("artistNames", artist_data.get("artist_names"))
+    if names is not None and (not is_list(names) or not all(isinstance(name, str) for name in names)):
+        raise ValueError(f"artistNames must be a list of strings in {album.parent}")
+    artist = next((name.strip() for name in names if isinstance(name, str) and name.strip()), "") if is_list(names) else ""
+    artist = (artist or (unescape_name(album.parent.name) if artist_scope else None)
+              or album_data.get("albumartist") or album_data.get("artist")
+              or consensus("albumartist") or consensus("artist") or unescape_name(album.parent.name))
+    dated = re.fullmatch(r"(.*?)\s*\[(\d{4})\]", album.name)
+    title = album_data.get("name") or consensus("album") or unescape_name(dated[1] if dated else album.name)
+    released = album_data.get("dateReleased", album_data.get("date_released"))
+    if released is not None and not is_mapping(released):
+        raise ValueError(f"Album dateReleased must be a mapping in {album}")
+    year = (released.get("y") if is_mapping(released) else None) or consensus("year") or (dated[2] if dated else None)
+    if (not isinstance(artist, str) or not artist.strip() or not isinstance(title, str) or not title.strip()
+            or not re.fullmatch(r"[1-9]\d{3}", str(year))):
+        raise ValueError(f"Could not determine artist, album and four-digit year for {album}")
+    logger.info("[%s] Inferred album: artist=%r title=%r year=%s", album, artist, title, year)
+    return artist.strip(), title.strip(), int(str(year))
+
+
+def resolve_album(
+    artist: str, title: str, year: int, client: OpenAI, catalogue: MusicBrainz,
+) -> tuple[dict[str, object], str]:
+    candidates = search_candidates(catalogue, "release", artist, title, year=year)
+    # Missing search dates may be filled by the release lookup; known wrong years are never selected.
+    candidates = [item for item in candidates if not item.get("date") or str(item["date"])[:4] == str(year)]
+    options, identifiers = selection_options(candidates, "album")
+    _, release_id, genre = select_catalogue_option(
+        client,
+        f"Create missing tracks for this exact album, not an artist's most popular song:\n"
+        f"{json.dumps({'artist': artist, 'album': title, 'year': year}, ensure_ascii=False)}\n"
+        f"Numbered options:\n{json.dumps(options, ensure_ascii=False)}",
+        identifiers, "album",
+    )
+    release = catalogue.get(f"release/{release_id}", inc="recordings+artist-credits")
+    if (release.get("id") != release_id
+            or directory_name_key(text_field(release, "title")) != directory_name_key(title)
+            or directory_name_key(artist_credit(release.get("artist-credit"))) != directory_name_key(artist)
+            or text_field(release, "date")[:4] != str(year)):
+        raise ValueError(f"Selected release does not match scoped album {artist} - {title} [{year}]")
+    return release, genre
+
+
+def missing_album_tracks(
+    prepared: list[tuple[Path, dict[str, object]]], album: Path,
+) -> list[tuple[Path, dict[str, object]]]:
+    existing_titles: set[str] = set()
+    yaml_stems: set[str] = set()
+    prepared_stems = {path.stem.casefold() for path, _ in prepared}
+    media: dict[str, list[Path]] = {}
+    for path in sorted(album.iterdir()):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() in {".yml", ".yaml"} and path.stem.casefold() not in RESERVED_YAML_STEMS:
+            yaml_stems.add(path.stem.casefold())
+            content = path.read_text(encoding="utf-8-sig")
+            if content.strip():
+                document = load_document(content)
+                data = document.get("trackData", document.get("track_data"))
+                if (is_mapping(data) and isinstance(data.get("title"), str)
+                        and path.stem.casefold() not in prepared_stems):
+                    existing_titles.add(directory_name_key(cast(str, data["title"])))
+        elif path.suffix.lower() in MEDIA_EXTENSIONS:
+            title = re.sub(r"^\d+(?:[.-]\d+)?\s*[-.]\s*|^\d+\s+", "", unescape_name(path.stem))
+            media.setdefault(directory_name_key(title), []).append(path)
+    missing: list[tuple[Path, dict[str, object]]] = []
+    for path, data in prepared:
+        title_key = directory_name_key(text_field(data, "title"))
+        if path.stem.casefold() in yaml_stems:
+            logger.info("Skipping existing scoped track: %s", path)
+            continue
+        if title_key in existing_titles:
+            matches = [
+                candidate for candidate, fields in prepared
+                if candidate.stem.casefold() not in yaml_stems
+                and directory_name_key(text_field(fields, "title")) == title_key
+            ]
+            if len(matches) > 1:
+                raise ValueError(f"Ambiguous existing YAML for repeated track title {title_key!r} in {album}")
+            logger.info("Skipping existing scoped track by title: %s", path)
+            continue
+        siblings = media.get(title_key, [])
+        exact = [sibling for sibling in siblings if sibling.stem.casefold() == path.stem.casefold()]
+        if exact:
+            siblings = exact
+        stems = {sibling.stem for sibling in siblings}
+        if len(stems) > 1:
+            raise ValueError(f"Ambiguous local media basenames for {path}: {sorted(stems)}")
+        if siblings:
+            path = siblings[0].with_suffix(".yml")
+            if path.stem.casefold() in yaml_stems:
+                logger.info("Skipping existing media sidecar: %s", path)
+                continue
+        missing.append((path, data))
+    if len({path for path, _ in missing}) != len(missing):
+        raise ValueError(f"Multiple catalogue tracks match the same local media sidecar in {album}")
+    return missing
+
+
+def directory_loop(
+    directory: Path, sleep_between_files: int = 30, llm_enabled: bool = True,
+    force: bool = False, dry_run: bool = False, count: int | None = None,
+) -> bool:
+    if sleep_between_files < 0 or (count is not None and count < 0):
+        raise ValueError("sleep and count must be non-negative")
+    albums = scoped_album_directories(directory)
+    logger.info("Directory mode: %s; %d album(s); request files are not read", directory, len(albums))
+    if force:
+        logger.info("Directory mode only creates missing track YAML; --force does not refresh existing files")
+    succeeded = True
+    client: OpenAI | None = None
+    catalogue = MusicBrainz()
+    for index, album in enumerate(albums):
+        if count is not None and index >= count:
+            break
+        try:
+            artist, title, year = infer_album_identity(album, artist_scope=album != directory)
+            if not llm_enabled:
+                logger.info("[%s] Lookup disabled: %s - %s [%d]", album, artist, title, year)
+                continue
+            if index:
+                time.sleep(sleep_between_files)
+            if client is None:
+                client = get_client()
+            release, genre = resolve_album(artist, title, year, client, catalogue)
+            prepared = prepare_tracks(release, None, album.parent.parent, album_dir=album)
+            missing = missing_album_tracks(prepared, album)
+            logger.info("[%s] %d catalogue tracks; %d missing YAML files", album, len(prepared), len(missing))
+            tracks = format_tracks(missing, genre)
+            save_tracks(tracks, album, force=False, dry_run=dry_run)
+        except (APIError, *YAML_ERRORS) as error:
+            logger.warning("[%s] Could not create missing album tracks: %s", album, error,
+                           exc_info=logger.isEnabledFor(logging.DEBUG))
+            succeeded = False
+    return succeeded
 
 
 def track_key(artist: str, title: str) -> tuple[str, str]:
@@ -819,6 +1027,10 @@ def main_loop(
     llm_enabled: bool = True, force: bool = False, dry_run: bool = False, count: int | None = None,
     *, target_dir: Path | None = None,
 ) -> bool:
+    if target_dir is not None:
+        if specific_dir is not None:
+            raise ValueError("A scoped directory cannot be combined with a destination override")
+        return directory_loop(target_dir, sleep_between_files, llm_enabled, force, dry_run, count)
     started = time.perf_counter()
     if sleep_between_files < 0 or (count is not None and count < 0):
         raise ValueError("sleep and count must be non-negative")
@@ -832,12 +1044,6 @@ def main_loop(
     if specific_dir.exists() and not specific_dir.is_dir():
         raise ValueError(f"Destination is not a directory: {specific_dir}")
     roots = collection_roots(specific_dir) if use_collection_roots else [specific_dir]
-    scope: Path | None = None
-    if target_dir is not None:
-        if not use_collection_roots:
-            raise ValueError("A scoped directory cannot be combined with a destination override")
-        specific_dir, scope = scoped_destination(target_dir, roots)
-        logger.info("Restricting output to %s; request file will not be modified", scope)
     logger.info(
         "Starting batch: input=%s, destination=%s, llm=%s, model=%s, force=%s, dry_run=%s, count=%s, sleep=%ds",
         specific_file, specific_dir, llm_enabled, MODEL_NAME, force, dry_run,
@@ -850,7 +1056,7 @@ def main_loop(
     logger.info("Reading UTF-8 request file: %s", specific_file)
     input_content = specific_file.read_bytes()
     lines = input_content.decode("utf-8-sig").splitlines(keepends=True)
-    update_input = llm_enabled and not dry_run and count != 0 and scope is None
+    update_input = llm_enabled and not dry_run and count != 0
     if update_input:
         if specific_file.is_symlink():
             raise ValueError(f"Refusing a symlink input file: {specific_file}")
@@ -885,10 +1091,8 @@ def main_loop(
                 logger.info("Initializing OpenAI-compatible client")
                 client = get_client()
             release, recording_id, genre = resolve_request(text, client, catalogue)
-            prepared = prepare_tracks(release, recording_id, specific_dir, [specific_dir] if scope else roots)
+            prepared = prepare_tracks(release, recording_id, specific_dir, roots)
             target = prepared[0][0]
-            if scope is not None and not target.resolve().is_relative_to(scope):
-                raise ValueError(f"Resolved output {target} is outside selected directory {scope}")
             alternate = target.with_suffix(".yaml")
             force_existing = force and (
                 target.exists() or target.is_symlink() or alternate.exists() or alternate.is_symlink()
@@ -903,7 +1107,7 @@ def main_loop(
                 logger.info("Skipping track already present in collection: %s", existing)
             else:
                 tracks = format_tracks(prepared, genre)
-                output_root = scope if scope is not None else target.parent.parent.parent
+                output_root = target.parent.parent.parent
                 save_tracks(tracks, output_root, force, dry_run)
                 if existing_index is not None and not dry_run:
                     for path, _ in tracks:
@@ -953,12 +1157,12 @@ def main() -> int:
     )
     targets.add_argument(
         "-d", "--dir", type=Path,
-        help="Existing artist or album directory in a configured mediaDirs entry; read the default request file without modifying it.",
+        help="Create only missing track YAML in this album directory or albums beneath an artist directory; infer artist, album and year locally.",
     )
-    parser.add_argument("--sleep", type=int, default=30, help="Seconds between input lines (default: 30).")
+    parser.add_argument("--sleep", type=int, default=30, help="Seconds between input lines or directory-mode albums (default: 30).")
     parser.add_argument("--llm", type=parse_boolean, default=True, metavar="true|false", help="False lists input without requests or writes.")
     parser.add_argument("--force", action="store_true", help="Refresh existing core metadata, keeping identifiers and mediaFileData; back up originals.")
-    parser.add_argument("-c", "--count", type=int, help="Process at most this many non-empty lines, including failed attempts.")
+    parser.add_argument("-c", "--count", type=int, help="Process at most this many non-empty lines or directory-mode albums, including failed attempts.")
     parser.add_argument(
         "-n", "--dry-run", action="store_true",
         help="Resolve requests and show diffs without writing output, backups, or input-file changes.",
@@ -971,6 +1175,10 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     try:
+        if args.dir is not None:
+            return 0 if directory_loop(
+                args.dir, args.sleep, args.llm, args.force, args.dry_run, args.count,
+            ) else 1
         input_file = args.file
         if input_file is None:
             root = os.environ.get("MOONGAS_COLLECTION_ROOTDIR")

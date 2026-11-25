@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Protocol, TypeVar, cast
 from unittest.mock import MagicMock
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request
 
 import pytest
 from mediascan.types.album.album_path import AlbumPathBuilder
@@ -400,7 +402,7 @@ def test_scoped_cli_creates_tracks_without_changing_request_file(
     selected = album.parent if scope == "artist" else album
     monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["track-yaml-auto-create", "-d", str(selected)])
-    install_lookup(monkeypatch, release)
+    install_directory_lookup(monkeypatch, release)
 
     assert populate.main() == 0
     assert sorted(path.name for path in album.glob("*.yml")) == ["01 - First.yml", "02 - Second.yml"]
@@ -409,44 +411,56 @@ def test_scoped_cli_creates_tracks_without_changing_request_file(
     assert not (tmp_path / "data/Music").exists()
 
 
-@pytest.mark.parametrize("scope", ["artist", "album"])
-def test_scoped_cli_rejects_resolved_output_outside_directory(
+def install_directory_lookup(
+    monkeypatch: pytest.MonkeyPatch, release: dict[str, object],
+) -> tuple[MagicMock, MagicMock]:
+    client, network = install_lookup(monkeypatch, release)
+    selection_client = model_client("option: 1\ngenre: Classic Rock\n")
+    client.chat.completions.create.side_effect = selection_client.chat.completions.create.side_effect
+    return client, network
+
+
+@pytest.mark.parametrize("mismatch", ["artist-credit", "title", "date"])
+def test_scoped_cli_rejects_wrong_album(
     tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture, scope: str,
+    caplog: pytest.LogCaptureFixture, mismatch: str,
 ) -> None:
-    source = tmp_path / "todo.txt"
-    source.write_text("Artist - Album (album)\n")
-    (tmp_path / "mediascan-config.yml").write_text("mediaDirs: [/data/Music]\n")
-    artist = tmp_path / "data/Music/Other Artist"
-    album = tmp_path / "data/Music/Artist/Other Album [1995]"
-    selected = artist if scope == "artist" else album
-    selected.mkdir(parents=True)
-    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
-    monkeypatch.setattr(sys, "argv", ["track-yaml-auto-create", "--dir", str(selected)])
-    install_lookup(monkeypatch, release)
-
-    assert populate.main() == 1
-    assert "outside selected directory" in caplog.text
-    assert source.read_text() == "Artist - Album (album)\n"
-    assert not (tmp_path / "todo.txt.bak").exists()
-    assert not list((tmp_path / "data/Music").rglob("*.yml"))
+    album = tmp_path / "Artist/Album [1995]"
+    album.mkdir(parents=True)
+    release[mismatch] = [{"name": "Other Artist"}] if mismatch == "artist-credit" else (
+        "Other Album" if mismatch == "title" else "2000-01-01"
+    )
+    install_directory_lookup(monkeypatch, release)
+    assert not populate.directory_loop(album)
+    assert "does not match scoped album" in caplog.text
+    assert not list(album.iterdir())
 
 
-def test_scoped_artist_creates_missing_album_without_touching_queue(
+def test_scoped_cli_does_not_read_missing_default_file_or_config(
     tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = tmp_path / "todo.txt"
-    source.write_text("Artist - Album (album)\n")
-    (tmp_path / "mediascan-config.yml").write_text("mediaDirs: [/data/Music]\n")
     artist = tmp_path / "data/Music/Artist"
-    artist.mkdir(parents=True)
-    monkeypatch.setenv("MOONGAS_COLLECTION_ROOTDIR", str(tmp_path))
+    album = artist / "Album [1995]"
+    album.mkdir(parents=True)
+    monkeypatch.delenv("MOONGAS_COLLECTION_ROOTDIR", raising=False)
     monkeypatch.setattr(sys, "argv", ["track-yaml-auto-create", "-d", str(artist)])
-    install_lookup(monkeypatch, release)
+    _, network = install_directory_lookup(monkeypatch, release)
+    original_read = Path.read_bytes
+
+    def reject_request_file(path: Path) -> bytes:
+        assert path.name != "todo.txt"
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_request_file)
 
     assert populate.main() == 0
-    assert (artist / "Album [1995]/01 - First.yml").is_file()
-    assert source.read_text() == "Artist - Album (album)\n"
+    assert (album / "01 - First.yml").is_file()
+    request = network.call_args_list[0].args[0]
+    assert isinstance(request, Request)
+    query = parse_qs(urlsplit(request.full_url).query)["query"][0]
+    assert 'artist:"Artist"' in query
+    assert 'release:"Album"' in query
+    assert "date:1995*" in query
     assert not (tmp_path / "todo.txt.bak").exists()
 
 
@@ -487,6 +501,194 @@ def test_scoped_cli_rejects_invalid_directories(
     assert populate.main() == 1
     assert "Selected" in caplog.text
     assert not (tmp_path / "todo.txt.bak").exists()
+
+
+def test_directory_identity_prefers_artist_yaml_and_album_yaml(tmp_path: Path) -> None:
+    album = tmp_path / "Escaped_Artist/Old title [2001]"
+    album.mkdir(parents=True)
+    (album.parent / "artist.yml").write_text("artistData:\n  artistNames: [Preferred Artist, Alias]\n")
+    (album / "album.yml").write_text("albumData:\n  name: True Album\n  dateReleased:\n    y: 1997\n")
+    (album / "old-track.yaml").write_text(
+        "trackData:\n  artist: Guest Artist\n  albumartist: Wrong Artist\n  album: Wrong Album\n  year: 2000\n"
+    )
+    assert populate.infer_album_identity(album) == ("Preferred Artist", "True Album", 1997)
+
+
+@pytest.mark.parametrize("artist_scope,artist", [(False, "Recorded Artist"), (True, "R.E.M.")])
+def test_directory_identity_track_metadata_and_artist_scope(
+    tmp_path: Path, artist_scope: bool, artist: str,
+) -> None:
+    album = tmp_path / "R_E_M_/Unknown"
+    album.mkdir(parents=True)
+    (album / "existing.yaml").write_text(
+        "track_data:\n  artist: Guest\n  albumartist: Recorded Artist\n  album: True Title\n  year: 1997\n"
+    )
+    assert populate.scoped_album_directories(album.parent) == [album]
+    assert populate.infer_album_identity(album, artist_scope=artist_scope) == (artist, "True Title", 1997)
+
+
+def test_directory_identity_unescapes_names_and_extracts_year(tmp_path: Path) -> None:
+    album = tmp_path / "R_E_M_/Life_s Rich Pageant [1986]"
+    album.mkdir(parents=True)
+    assert populate.infer_album_identity(album) == ("R.E.M.", "Life.s Rich Pageant", 1986)
+
+
+def test_directory_identity_uses_album_artist_without_parent_metadata(tmp_path: Path) -> None:
+    album = tmp_path / "Unknown/Album"
+    album.mkdir(parents=True)
+    (album / "album.yaml").write_text(
+        "albumData:\n  artist: Real Artist\n  name: Album\n  dateReleased: {y: 1997}\n"
+    )
+    assert populate.scoped_album_directories(album) == [album]
+    assert populate.infer_album_identity(album) == ("Real Artist", "Album", 1997)
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_directory_preserves_nonstandard_existing_tracks_and_uses_media_basename(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch, force: bool,
+) -> None:
+    album = tmp_path / "Artist/ALBUM [1995]"
+    album.mkdir(parents=True)
+    existing = album / "custom name.yaml"
+    original = "trackData:\n  title: First\n  artist: Artist\n  album: Album\n  year: 1995\n"
+    existing.write_text(original)
+    (album / "07 - Second.flac").touch()
+    (album / "07 - Second.mp3").touch()
+    install_directory_lookup(monkeypatch, release)
+
+    assert populate.directory_loop(album, force=force)
+    assert existing.read_text() == original
+    assert sorted(path.name for path in album.glob("*.yml")) == ["07 - Second.yml"]
+    assert not list(album.glob("*.bak"))
+    assert not (album.parent / "Album [1995]").exists()
+
+
+def test_directory_skips_existing_media_sidecar_even_without_title(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    album = tmp_path / "Artist/Album [1995]"
+    album.mkdir(parents=True)
+    (album / "07 - First.mp3").touch()
+    (album / "07 - First.yaml").write_text("trackData: {}\n")
+    install_directory_lookup(monkeypatch, release)
+    assert populate.directory_loop(album)
+    assert sorted(path.name for path in album.glob("*.yml")) == ["02 - Second.yml"]
+
+
+@pytest.mark.parametrize("dry_run,llm_enabled", [(True, True), (False, False)])
+def test_directory_preview_does_not_write(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool, llm_enabled: bool,
+) -> None:
+    album = tmp_path / "Artist/Album [1995]"
+    album.mkdir(parents=True)
+    if llm_enabled:
+        _, network = install_directory_lookup(monkeypatch, release)
+    else:
+        network = MagicMock(side_effect=AssertionError("Unexpected client initialization"))
+        monkeypatch.setattr(populate, "get_client", network)
+    assert populate.directory_loop(album, dry_run=dry_run, llm_enabled=llm_enabled)
+    assert network.call_count == (2 if llm_enabled else 0)
+    assert not list(album.iterdir())
+
+
+@pytest.mark.parametrize("count,attempts", [(None, 2), (0, 0), (1, 1)])
+def test_directory_count_and_sleep_apply_to_albums(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    count: int | None, attempts: int,
+) -> None:
+    artist = tmp_path / "Artist"
+    first = artist / "Album [1995]"
+    second = artist / "Other Album [1996]"
+    first.mkdir(parents=True)
+    second.mkdir()
+    other_release: dict[str, object] = {**release, "title": "Other Album", "date": "1996"}
+    resolver = MagicMock(side_effect=[(release, "Classic Rock"), (other_release, "Classic Rock")])
+    monkeypatch.setattr(populate, "resolve_album", resolver)
+    monkeypatch.setattr(populate, "get_client", lambda: cast(OpenAI, MagicMock()))
+    sleep = MagicMock()
+    monkeypatch.setattr(populate.time, "sleep", sleep)
+
+    assert populate.directory_loop(artist, count=count, sleep_between_files=7)
+    assert resolver.call_count == attempts
+    assert sleep.call_args_list == ([((7,), {})] if attempts == 2 else [])
+    if attempts:
+        assert resolver.call_args_list[0].args[:3] == ("Artist", "Album", 1995)
+        assert (first / "01 - First.yml").is_file()
+    assert (second / "01 - First.yml").exists() == (attempts == 2)
+
+
+def test_directory_album_scope_does_not_process_sibling_album(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    album = tmp_path / "Artist/Album [1995]"
+    album.mkdir(parents=True)
+    other = album.parent / "Other [2000]"
+    other.mkdir()
+    install_directory_lookup(monkeypatch, release)
+    assert populate.directory_loop(album)
+    assert not list(other.iterdir())
+
+
+def test_directory_failure_is_logged_and_later_albums_continue(
+    tmp_path: Path, release: dict[str, object], monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    artist = tmp_path / "Artist"
+    broken = artist / "A broken [1995]"
+    broken.mkdir(parents=True)
+    (broken / "album.yml").write_text("albumData: []\n")
+    good = artist / "Album [1995]"
+    good.mkdir()
+    install_directory_lookup(monkeypatch, release)
+    assert not populate.directory_loop(artist, sleep_between_files=0)
+    assert "Expected albumData mapping" in caplog.text
+    assert (good / "01 - First.yml").is_file()
+
+
+def test_directory_does_not_read_todo_even_through_main_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    album = tmp_path / "Artist/Album [1995]"
+    album.mkdir(parents=True)
+    monkeypatch.delenv("MOONGAS_COLLECTION_ROOTDIR", raising=False)
+    assert populate.main_loop(tmp_path / "missing.txt", target_dir=album, llm_enabled=False)
+    assert not list(album.iterdir())
+
+
+@pytest.mark.parametrize("existing", ["yaml", "media"])
+def test_directory_repeated_title_keeps_distinct_track_numbers(tmp_path: Path, existing: str) -> None:
+    album = tmp_path / "Artist/Album [1995]"
+    album.mkdir(parents=True)
+    first = album / "01 - First.yml"
+    second = album / "02 - First.yml"
+    fields: dict[str, object] = {"title": "First"}
+    if existing == "yaml":
+        first.write_text("trackData:\n  title: First\n")
+    else:
+        first.with_suffix(".mp3").touch()
+        second.with_suffix(".mp3").touch()
+    missing = populate.missing_album_tracks([(first, fields), (second, fields)], album)
+    assert [path for path, _ in missing] == ([second] if existing == "yaml" else [first, second])
+
+
+def test_directory_ambiguous_repeated_title_fails_explicitly(tmp_path: Path) -> None:
+    (tmp_path / "custom.yaml").write_text("trackData:\n  title: First\n")
+    fields: dict[str, object] = {"title": "First"}
+    with pytest.raises(ValueError, match="Ambiguous existing YAML"):
+        populate.missing_album_tracks(
+            [(tmp_path / "01 - First.yml", fields), (tmp_path / "02 - First.yml", fields)], tmp_path,
+        )
+
+
+def test_directory_repeated_title_cannot_share_one_media_sidecar(tmp_path: Path) -> None:
+    (tmp_path / "07 - First.mp3").touch()
+    fields: dict[str, object] = {"title": "First"}
+    with pytest.raises(ValueError, match="same local media sidecar"):
+        populate.missing_album_tracks(
+            [(tmp_path / "01 - First.yml", fields), (tmp_path / "02 - First.yml", fields)], tmp_path,
+        )
+    assert not list(tmp_path.glob("*.yml"))
 
 
 def test_file_mode_reuses_album_in_later_media_root(
@@ -1178,7 +1380,7 @@ def test_cli_default_file_requires_collection_root(
         sys, "argv", ["track-yaml-auto-create", "--dir", "/unused"]
     )
     assert populate.main() == 1
-    assert "MOONGAS_COLLECTION_ROOTDIR must be set, or use --file" in caplog.text
+    assert "Selected directory does not exist" in caplog.text
 
 
 def test_cli_missing_default_file_reports_error(

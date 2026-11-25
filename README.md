@@ -1092,11 +1092,29 @@ collection root even when it begins with `/`. For example, `mediaDirs: [/data/Mu
 /data/MusicOther]` selects `$MOONGAS_COLLECTION_ROOTDIR/data/Music`.
 A missing config or missing, empty, or invalid first entry is an error; there is
 no hard-coded directory fallback. `--file` and `-d` / `--dir` are mutually
-exclusive. `--dir` selects an existing artist directory or an existing
-year-tagged album directory under a configured `mediaDirs` entry. It reads the
-default `todo.txt` without modifying it or its backup. Requests resolving
-outside the selected directory are warned and not written; the run reports
-failure. Album directories inside a selected artist directory may be created.
+exclusive. `--dir` completes existing albums in the selected artist directory,
+or just the selected album directory. It never reads `todo.txt` or any request
+file, and does not require the collection environment variable or configuration.
+Albums are recognized by a trailing `[YYYY]`, an `album.yml` / `album.yaml`,
+or existing track YAML containing album metadata.
+For artist-directory scope, the preferred name comes from
+`artist.yml` / `artist.yaml` (`artistData.artistNames[0]`), otherwise the
+unescaped artist directory name. For album-directory scope, parent artist YAML
+takes precedence, followed by artist information in album or existing track
+YAML, then the unescaped parent directory name. Album name and year come from
+`albumData.name` and `albumData.dateReleased.y`, then existing track metadata,
+then the album directory name with its trailing `[YYYY]` removed and used as
+the year. Directory unescaping restores underscores to periods, which is
+necessarily best-effort. Malformed or conflicting metadata is reported, not
+silently guessed.
+Each identified album is searched by artist, title and year; the selected
+release must match all three. New files stay in the existing album directory
+even when its spelling differs from the catalogue. Existing track YAML is
+preserved, including tracks with nonstandard filenames matched by title.
+When matching local media exists, its basename is used for the new YAML sidecar.
+Directory mode only adds missing files, even with `--force`; it does not refresh
+existing files or create additional album directories. Directory symlinks are
+followed within the selected scope, with cycles skipped and escapes rejected.
 In file mode, matching existing artist and album directories are reused across
 all configured media directories; if none exists, the first is used. Ambiguous
 matches are errors.
@@ -1180,10 +1198,13 @@ symlinks leading outside the destination are rejected. New files are published
 atomically without overwriting files that appear during processing.
 
 `-n` / `--dry-run` performs the lookups and shows unified diffs, but creates no
-directories, YAML files, or backups. `--llm=false` only lists input requests;
+directories, YAML files, or backups. `--llm=false` only lists input requests
+(or locally inferred albums with `--dir`);
 it makes no LLM or MusicBrainz calls and changes nothing.
 `-c` / `--count` limits non-empty input lines, including failed attempts;
-`--count 0` makes no requests. `--sleep` defaults to 30 seconds between lines.
+`--count 0` makes no requests. With `--dir`, count limits albums instead of lines,
+including failed attempts, and failures do not prevent later albums being tried.
+`--sleep` defaults to 30 seconds between lines or directory-mode album attempts.
 MusicBrainz calls are additionally paced at just over one second apart.
 Temporary HTTP 429/500/502/503/504 responses and connection/timeout failures are
 retried up to four total attempts per catalogue request, with 2/4/8-second
